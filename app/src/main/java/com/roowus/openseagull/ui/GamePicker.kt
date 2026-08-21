@@ -100,9 +100,10 @@ internal class GamePicker(
             root.addView(R.id.picker_rows, row)
         }
 
-        // Logged because the binder budget is the one limit here that is not visible on screen: a
-        // page that is too heavy fails as a TransactionTooLargeException in the *host's* process,
-        // which is a confusing place to debug from. This makes the cost an observed number.
+        // Logged because a page's cost is otherwise invisible: it is paid in the *host's* process,
+        // where our logs are not. The KiB figure is bitmap heap, not transaction size — posters
+        // above a few KB cross via ashmem, so the parcel stays tiny (measured: 5460 bytes against
+        // 1387 KiB of pixels). It is the host's memory while the page is up that this bounds.
         Log.i(
             TAG,
             "picker page ${pagination.page + 1}/$pages — ${pageGames.size} games, " +

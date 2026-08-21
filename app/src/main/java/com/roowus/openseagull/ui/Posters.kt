@@ -76,6 +76,14 @@ internal object Posters {
         return bitmap
     }
 
-    /** Bytes this bitmap will cost to send, for the page-budget log. */
+    /**
+     * Heap bytes this bitmap occupies, for the page-budget log.
+     *
+     * Deliberately *not* "bytes it costs to send". A bitmap above a few KB is written to ashmem and
+     * the parcel carries only a file descriptor, so this figure and the transaction size are
+     * different quantities — measured on one page: 1387 KiB of bitmap against a 5460-byte parcel.
+     * What this number bounds is the memory the host holds while the page is on screen, which is
+     * the limit that actually applies here.
+     */
     fun approximateBytes(bitmap: Bitmap): Int = bitmap.allocationByteCount
 }
