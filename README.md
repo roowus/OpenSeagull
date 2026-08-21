@@ -1,7 +1,20 @@
-# OpenSeagull
+# OpenSeagull — a mod layer for OpenPigeon, the GamePigeon-compatible extension for Android
 
-An OpenBubbles extension that adds features to [OpenPigeon] by hosting it at runtime, rather than
-replacing or forking it.
+OpenSeagull is an [OpenBubbles] extension that adds features to [OpenPigeon] by hosting it at
+runtime, rather than replacing or forking it.
+
+**Some context, if you arrived here from the GamePigeon side of things.** [GamePigeon] is the iOS
+iMessage app that people use to send 8 Ball, Sea Battle, Word Hunt and the rest as playable
+balloons in a chat. It is iOS-only and closed-source. [OpenBubbles] is an Android iMessage client,
+and [OpenPigeon] is its GamePigeon-compatible game extension — the piece that lets an Android
+device send and receive those same games with iPhone users. OpenSeagull sits one layer above
+OpenPigeon and adds to it. It is not a GamePigeon client by itself, and it is not affiliated with
+GamePigeon, OpenPigeon, OpenBubbles, or Apple.
+
+The name is a nod to **GameSeagull**, a separate Android app — likewise unaffiliated with
+GamePigeon — that offers GamePigeon-style games under its own name and artwork rather than
+redistributing anyone else's. Naming aside, the two projects are unrelated and share no code:
+OpenSeagull is a mod layer that requires OpenPigeon, not a standalone game app.
 
 OpenSeagull ships **no OpenPigeon code, artwork, or game data**. It reads what it needs from the
 copy of OpenPigeon already installed on your device. Both apps stay installed, side by side, and
@@ -12,6 +25,7 @@ OpenPigeon is never modified.
 > wired up yet. Today the app is a diagnostics screen and a registerable extension.
 
 [OpenPigeon]: https://github.com/OpenBubbles/OpenPigeon
+[GamePigeon]: https://apps.apple.com/us/app/gamepigeon/id1124197642
 
 ## Why this exists
 

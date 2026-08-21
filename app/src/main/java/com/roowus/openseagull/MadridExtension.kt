@@ -55,15 +55,26 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         callback = null
     }
 
+    /**
+     * Opening a game is not wired up yet. Deliberately a no-op: launching the wrong thing would be
+     * worse than doing nothing, and the status view already says where the project stands.
+     *
+     * One design question is already settled, and against the convenient answer. OpenPigeon opens
+     * a game with `Intent(context, game.gameClass())` — so the obvious shortcut is to aim that
+     * same Intent at their package and let their process do the work. It cannot be done: every
+     * game activity in their manifest is `android:exported="false"`, which the framework enforces
+     * across packages regardless of signature. `GameSessionService` is exported, but it is the
+     * session channel, not the UI.
+     *
+     * So gameplay has to run in *our* process, from their classes, through their ClassLoader —
+     * the same reflective path everything else here uses. That is more work than delegation, but
+     * it is also the only path consistent with not shipping their content.
+     */
     override fun didTapTemplate(
         message: MadridMessage?,
         handle: IMessageViewHandle?,
         userCount: Int,
-    ) {
-        // Opening a game is not wired up yet. Deliberately a no-op: launching the wrong thing
-        // would be worse than doing nothing, and the status view already tells the user where
-        // the project stands.
-    }
+    ) = Unit
 
     override fun getLiveView(
         callback: IViewUpdateCallback?,
