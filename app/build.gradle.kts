@@ -18,7 +18,15 @@ android {
         applicationId = "com.roowus.openseagull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
+        // Dated (yyMMddNN), not sequential, and deliberately continuing the fork's numbering
+        // even though this is a new project. The fork shipped the same applicationId, so a device
+        // that has it installed will only accept this APK as an *update* — a lower code is refused
+        // as a downgrade, and the alternative, uninstalling first, is the one operation that must
+        // be avoided: uninstalling while still registered in OpenBubbles makes the host's
+        // refreshCache() throw mid-loop on a package that no longer exists.
+        //
+        // versionName restarts at 0.1.0 because that is honestly where this codebase is.
+        versionCode = 26082102
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

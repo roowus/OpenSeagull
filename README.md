@@ -129,6 +129,13 @@ state, just not one that can test anything. Read its descriptive output with:
 adb logcat -d -s SEAGULL:I
 ```
 
+**Known gap in the verification.** On the development device both apps are signed with the same
+debug key, so the suite reports `SIGNATURE_MATCH` and does not exercise the cross-signature path
+that every real user will be on. `createPackageContext(INCLUDE_CODE)` was separately confirmed to
+work across `SIGNATURE_NO_MATCH`, which is the load-bearing part, but the full suite has not yet
+run against a release-signed OpenPigeon. `reportEnvironment` prints which case it saw, so this is
+visible in the output rather than assumed.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
