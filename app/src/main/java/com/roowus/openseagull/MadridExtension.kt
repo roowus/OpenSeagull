@@ -1,6 +1,10 @@
 package com.roowus.openseagull
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.os.RemoteException
+import android.util.Log
 import android.widget.RemoteViews
 import com.bluebubbles.messaging.IKeyboardHandle
 import com.bluebubbles.messaging.IMadridExtension
@@ -9,20 +13,21 @@ import com.bluebubbles.messaging.IViewUpdateCallback
 import com.bluebubbles.messaging.MadridMessage
 import com.roowus.openseagull.host.ForeignGameCatalog
 import com.roowus.openseagull.host.InstalledOpenPigeon
+import com.roowus.openseagull.ui.GamePicker
 
 /**
  * OpenSeagull's implementation of the OpenBubbles extension contract.
  *
  * ## Scope of this version
  *
- * This is the **runtime-host skeleton**, not a finished extension. It implements all five methods
- * of [IMadridExtension] and renders a real status view built from the user's installed OpenPigeon
- * — which is what proves the architecture end to end inside OpenBubbles rather than only inside an
- * instrumented test. It does not yet render a playable keyboard or live game view.
+ * The keyboard now renders a real, paginated grid of the games found in the user's installed
+ * OpenPigeon, drawn with their own poster art. Tapping a game is recognised and logged but does
+ * not yet start it — see [launchGame] — and the live view for a received game is still the status
+ * view rather than a board.
  *
- * The unimplemented methods return a status view rather than a stub or an exception, so a bind
- * from OpenBubbles always produces something legible on screen. Where a method cannot yet do its
- * job, the view says so; it does not pretend to have succeeded.
+ * Methods that cannot yet do their job return a status view rather than a stub or an exception, so
+ * a bind from OpenBubbles always produces something legible on screen. Where a method is
+ * incomplete, the view says so; it does not pretend to have succeeded.
  *
  * ## Why the extension owns an [InstalledOpenPigeon]
  *
@@ -42,17 +47,109 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
 
     private var callback: IViewUpdateCallback? = null
 
+    /**
+     * Kept across the whole keyboard session so paging survives a redraw.
+     *
+     * Rebuilt on each [keyboardOpened] rather than held for the life of the process: the user may
+     * install or update OpenPigeon between openings, and a stale catalog would show a game list
+     * that no longer matches what is on the device.
+     */
+    private var picker: GamePicker? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     override fun keyboardOpened(
         callback: IViewUpdateCallback?,
         handle: IKeyboardHandle?,
         userCount: Int,
     ): RemoteViews {
         this.callback = callback
-        return statusView()
+
+        val p = pigeon ?: return statusView()
+        val catalog = ForeignGameCatalog.of(p)
+        if (catalog.isEmpty) return statusView()
+
+        val picker = GamePicker(context, catalog).also { this.picker = it }
+        picker.keyboardHeightDp = keyboardHeightDpForHost()
+        return picker.build()
     }
 
     override fun keyboardClosed() {
         callback = null
+        picker = null
+    }
+
+    /**
+     * How tall the host will make the panel, which decides whether we get two rows or three.
+     *
+     * OpenPigeon resolves this from the calling uid's package name and version, expanding to 380 dp
+     * on newer OpenBubbles builds. That detection is worth replicating, but not worth guessing at:
+     * until the mapping from host version to panel height has been *measured* on-device, assuming
+     * the expanded height would render a third row that the host then clips.
+     *
+     * So this returns the conservative default. A wrong guess here is invisible in logs and shows
+     * up only as a row the user cannot reach, which is exactly the kind of bug this project has
+     * been avoiding by measuring first.
+     */
+    private fun keyboardHeightDpForHost(): Int = GamePicker.Metrics.DefaultKeyboardHeightDp
+
+    /**
+     * Advance the picker and push the new page to the host.
+     *
+     * Called from [PickerActionReceiver], i.e. from a tap that happened in the host's process.
+     */
+    fun changePage(delta: Int) {
+        val picker = this.picker ?: run {
+            Log.w(TAG, "page tap with no open picker — dropping")
+            return
+        }
+        if (!picker.movePage(delta)) return
+        pushView(picker.build())
+    }
+
+    /**
+     * Start a game. Not yet implemented — see [didTapTemplate] for why this is the hard part.
+     *
+     * The tap is logged rather than silently ignored so that "the grid is wired" and "the grid is
+     * decorative" are distinguishable from outside the process: `adb logcat -s SEAGULL:I`.
+     */
+    fun launchGame(name: String) {
+        Log.i(TAG, "launch requested for '$name' — gameplay not wired up yet")
+    }
+
+    /**
+     * Send a new view to the host.
+     *
+     * Posted twice: once now, once after a short delay on the main thread. This mirrors what
+     * OpenPigeon does, and the reason is that [IViewUpdateCallback.updateView] is `oneway` — it
+     * returns immediately with no indication of whether the host was in a state to apply the
+     * update. An update that arrives while the host is still laying the panel out can be dropped
+     * silently. The second post costs one extra binder call and removes a class of "the tap did
+     * nothing" reports that would otherwise be unreproducible.
+     *
+     * A [RemoteException] here means the host went away between the tap and the push, which is
+     * ordinary — the callback is cleared and the next [keyboardOpened] will supply a fresh one.
+     */
+    private fun pushView(views: RemoteViews) {
+        val target = callback ?: run {
+            Log.w(TAG, "no host callback — cannot push view")
+            return
+        }
+        try {
+            target.updateView(views)
+        } catch (e: RemoteException) {
+            Log.w(TAG, "host went away during updateView", e)
+            callback = null
+            return
+        }
+        mainHandler.postDelayed({
+            try {
+                callback?.updateView(views)
+            } catch (e: RemoteException) {
+                Log.w(TAG, "host went away during delayed updateView", e)
+                callback = null
+            }
+        }, RedrawSettleMs)
     }
 
     /**
@@ -119,5 +216,12 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
             },
         )
         return views
+    }
+
+    private companion object {
+        const val TAG = "SEAGULL"
+
+        /** Delay before the second `updateView`, matching OpenPigeon's workaround. */
+        const val RedrawSettleMs = 50L
     }
 }

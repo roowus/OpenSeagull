@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  One row of the picker grid. Cells are added into it at runtime.
+
+  100dp matches OpenPigeon's GAME_PICKER_ROW_HEIGHT_DP, which is what their rows-per-page
+  arithmetic divides by. Keeping the number here in sync with that constant is the whole reason
+  a page of ours is the same shape as a page of theirs.
+
+  The root carries an id because RemoteViews.addView() addresses its container by id — there is no
+  "add to the root" overload.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/picker_row_cells"
+    android:layout_width="match_parent"
+    android:layout_height="100dp"
+    android:orientation="horizontal"
+    android:baselineAligned="false" />

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The game picker, inflated inside OpenBubbles' process via RemoteViews.
+
+  Same constraint as extension_status.xml: only the RemoteViews-supported widget set. No custom
+  views, no Compose. Rows are added at runtime with RemoteViews.addView(R.id.picker_rows, …)
+  because the number of them depends on the host's keyboard height, which is only known once the
+  host has bound.
+
+  Attributes set in XML are inflated normally, so layout_weight and padding are free. It is the
+  *programmatic* setters that are limited to @RemotableViewMethod — which is why the row and cell
+  layouts carry their own sizing rather than having it applied from code.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="4dp"
+    android:paddingEnd="4dp"
+    android:paddingTop="4dp"
+    android:paddingBottom="8dp">
+
+    <!-- 44dp to match OpenPigeon's GAME_PICKER_HEADER_HEIGHT_DP; the rows-per-page arithmetic
+         subtracts exactly this much from the keyboard height. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <!-- 38dp arrow slots either side, as OpenPigeon uses, so the title stays optically
+             centred whether or not the arrows are visible. -->
+        <ImageView
+            android:id="@+id/picker_prev"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:padding="9dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/picker_arrow_left"
+            android:contentDescription="@string/picker_previous_page" />
+
+        <TextView
+            android:id="@+id/picker_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <ImageView
+            android:id="@+id/picker_next"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:padding="9dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/picker_arrow_right"
+            android:contentDescription="@string/picker_next_page" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/picker_rows"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical" />
+</LinearLayout>

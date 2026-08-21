@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  One game in the picker: poster above a label.
+
+  `layout_width="0dp"` with `layout_weight="1"` is what makes five cells share a row evenly at any
+  screen width. It survives RemoteViews.addView because the child is inflated against its parent,
+  so the parent generates LinearLayout.LayoutParams from these attributes — the weight is read at
+  inflation time, not applied later through a setter (there is no @RemotableViewMethod for it).
+
+  An empty trailing cell on a short final page uses this same layout with no image and no text, so
+  the surviving cells keep their width instead of stretching.
+
+  74dp poster and 100dp row height are OpenPigeon's numbers, so a page of ours occupies the same
+  space as a page of theirs.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/cell_root"
+    android:layout_width="0dp"
+    android:layout_height="match_parent"
+    android:layout_weight="1"
+    android:orientation="vertical"
+    android:gravity="center_horizontal"
+    android:padding="1dp">
+
+    <ImageView
+        android:id="@+id/cell_poster"
+        android:layout_width="match_parent"
+        android:layout_height="74dp"
+        android:scaleType="centerCrop"
+        android:adjustViewBounds="false"
+        android:contentDescription="@null" />
+
+    <TextView
+        android:id="@+id/cell_label"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="10sp" />
+</LinearLayout>

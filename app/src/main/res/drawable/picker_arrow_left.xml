@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Drawn here rather than imported. A chevron is a chevron, but shipping one of OpenPigeon's would
+  contradict the whole point of the project, and the CI dex gate would not catch a stray drawable.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?android:attr/textColorSecondary">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M15.41,7.41 L14,6l-6,6 6,6 1.41,-1.41L10.83,12z" />
+</vector>

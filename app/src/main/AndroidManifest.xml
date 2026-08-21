@@ -67,6 +67,17 @@
                 android:value="com.apple.messages.MSMessageExtensionBalloonPlugin:EWFNLB79LQ:com.gamerdelights.gamepigeon.ext" />
         </service>
 
+        <!-- Where picker taps come back to us. A RemoteViews inflates in OpenBubbles' process, so
+             the only handler it can carry is a PendingIntent, and the only way back into our
+             process is for that PendingIntent to start one of our components.
+
+             Not exported: the PendingIntents are created here and merely held by the host, which
+             is what lets it fire them. No other app needs to send us these broadcasts. -->
+        <receiver
+            android:name=".PickerActionReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
     </application>
 
 </manifest>

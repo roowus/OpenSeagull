@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">OpenSeagull</string>
+
+    <!-- Picker chrome. These are read by TalkBack inside OpenBubbles' process; the arrows are
+         otherwise unlabelled glyphs. -->
+    <string name="picker_previous_page">Previous page</string>
+    <string name="picker_next_page">Next page</string>
 </resources>
