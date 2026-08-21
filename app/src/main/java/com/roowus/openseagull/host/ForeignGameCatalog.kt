@@ -86,6 +86,12 @@ class ForeignGame internal constructor(
  *
  * The fallback is deliberately not silent — [strategy] records which path produced the result, so
  * a diagnostic screen can distinguish "OpenPigeon has no games" from "we failed to read its list".
+ *
+ * The count is whatever the installed build has, and is expected to differ from any list read out
+ * of OpenPigeon's current source. Measured against v1.1.0 (versionCode 26071901): 25 games, where
+ * upstream source at the time listed 26. The missing one was Shuffleboard, added upstream after
+ * that APK was built — confirmed by finding no `openpigeon/shuffle` classes in the installed dex.
+ * Reading their registry rather than a list of our own is precisely what makes that a non-event.
  */
 class ForeignGameCatalog private constructor(
     val games: List<ForeignGame>,
