@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
+import android.util.Log
 
 /**
  * The service OpenBubbles binds to.
@@ -34,8 +35,19 @@ class MadridExtensionService : Service() {
         var extension: MadridExtension? = null
     }
 
+    /**
+     * Logged because a successful bind is otherwise invisible from outside the process.
+     *
+     * Registering in Developer Tools produces no user-visible confirmation, and a bind leaves no
+     * lasting trace in `dumpsys activity services` — the host unbinds as soon as it has what it
+     * needs, so polling for a live ServiceRecord reports "nothing" for both "never registered" and
+     * "registered and working". This line is the difference between those two, and it is why the
+     * tag is greppable: `adb logcat -s SEAGULL:I`.
+     */
     override fun onBind(intent: Intent): IBinder {
+        val reused = extension != null
         val existing = extension ?: MadridExtension(this).also { extension = it }
+        Log.i("SEAGULL", "onBind from OpenBubbles — action=${intent.action} reusedExtension=$reused")
         return existing
     }
 
