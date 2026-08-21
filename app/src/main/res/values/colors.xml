@@ -1,0 +1,4 @@
+<resources>
+    <!-- Distinct from OpenPigeon's #34406A so the two launcher icons are never confused. -->
+    <color name="seagull_teal">#FF1F6F6B</color>
+</resources>

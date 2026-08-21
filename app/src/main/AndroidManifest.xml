@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Package-visibility filtering (targetSdk 30+) hides other apps by default: without these
+         entries every PackageManager call against them throws NameNotFoundException even when the
+         app is installed. OpenSeagull needs to see OpenPigeon to read its code and assets, and to
+         see OpenBubbles to be bound by it. -->
+    <queries>
+        <package android:name="com.openbubbles.openpigeon" />
+        <package android:name="com.bluebubbles.messaging" />
+        <package android:name="com.openbubbles.messaging" />
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.OpenSeagull">
+
+        <!-- Diagnostics. Exported so it can be launched directly:
+             adb shell am start -n com.roowus.openseagull/.DiagnosticsActivity -->
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The component OpenBubbles binds to.
+             Register it in OpenBubbles → Settings → Troubleshoot → Developer Tools as exactly:
+                 com.roowus.openseagull.MadridExtensionService
+
+             The metadata below is the routing contract and is NOT free to change:
+             - madrid_id 1124197642 is the sole routing key. Real inbound iOS GamePigeon balloons
+               all carry this appId; anything else never receives a real game.
+             - madrid_name goes ON THE WIRE as the balloon label on the recipient's iPhone, so it
+               must stay "GamePigeon". The picker shows the app label (OpenSeagull) instead, which
+               is why the two differ on purpose.
+             - madrid_bundle_id is the iOS extension identifier, also wire format. -->
+        <service
+            android:name=".MadridExtensionService"
+            android:enabled="true"
+            android:exported="true"
+            tools:ignore="ExportedService">
+            <intent-filter>
+                <action android:name="com.openbubbles.messaging.MadridExtensionService" />
+            </intent-filter>
+            <meta-data
+                android:name="madrid_icon"
+                android:resource="@drawable/madrid_icon" />
+            <meta-data
+                android:name="color"
+                android:value="0xFF1F6F6B" />
+            <meta-data
+                android:name="madrid_id"
+                android:value="1124197642" />
+            <meta-data
+                android:name="madrid_name"
+                android:value="GamePigeon" />
+            <meta-data
+                android:name="madrid_bundle_id"
+                android:value="com.apple.messages.MSMessageExtensionBalloonPlugin:EWFNLB79LQ:com.gamerdelights.gamepigeon.ext" />
+        </service>
+
+    </application>
+
+</manifest>

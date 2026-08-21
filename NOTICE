@@ -1,0 +1,53 @@
+OpenSeagull
+Copyright 2026 OpenSeagull contributors
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+--------------------------------------------------------------------------------
+Third-party material included in this repository
+--------------------------------------------------------------------------------
+
+app/src/main/aidl/com/bluebubbles/messaging/*.aidl
+
+    Six AIDL interface definitions, copied unmodified from the OpenBubbles
+    project:
+
+        https://github.com/OpenBubbles/OpenBubbles
+        android/app/src/main/aidl/com/bluebubbles/messaging/
+
+    Copyright the OpenBubbles contributors, licensed under the Apache License,
+    Version 2.0.
+
+    These files define the Binder interface an extension must implement in order
+    to be bound by OpenBubbles. They are the host's own published interface, and
+    they are included here for the same reason a client includes a protocol
+    header: an interface definition has to be byte-identical on both sides of
+    the wire or the bind fails at runtime.
+
+gradlew, gradlew.bat, gradle/wrapper/gradle-wrapper.jar
+
+    The Gradle wrapper, copyright the Gradle authors, licensed under the Apache
+    License, Version 2.0. Build tooling, not project content.
+
+--------------------------------------------------------------------------------
+Material deliberately NOT included
+--------------------------------------------------------------------------------
+
+This repository contains no OpenPigeon source code, game logic, artwork, audio,
+Godot project data, or native libraries, and it is not a fork of OpenPigeon.
+
+OpenPigeon is distributed under PolyForm Shield 1.0.0 with a separate asset
+license that does not permit redistribution of its assets in any form. Rather
+than vendor that material, OpenSeagull loads the code and resources it needs
+from the copy of OpenPigeon already installed on the user's own device, at
+runtime. OpenSeagull is useless without OpenPigeon installed, by construction.
+
+That claim is enforced mechanically, not merely asserted:
+
+  - WireContractTest.shippedSourceDeclaresNoOpenPigeonPackage fails the build if
+    any file under app/src/main declares an OpenPigeon package.
+  - RuntimeHostProbe.weShipNoOpenPigeonCode fails on-device if OpenPigeon
+    classes turn out to be loadable from our own APK.
+
+All OpenSeagull artwork (res/drawable/seagull_mark.xml and the icons built from
+it) is original to this project.

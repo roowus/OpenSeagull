@@ -1,0 +1,66 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push makes an in-flight run irrelevant; main is exempt so its history stays complete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest --console=plain
+
+      - name: Assemble debug
+        run: ./gradlew assembleDebug --console=plain
+
+      # The content-free claim is this project's legal foundation, so it is checked against the
+      # built artifact and not only the source tree. The unit test greps sources; this greps the
+      # dex. Both must agree.
+      - name: Verify the APK carries no OpenPigeon code
+        run: |
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          if unzip -p "$apk" 'classes*.dex' | strings | grep -q 'Lcom/openbubbles/openpigeon/'; then
+            echo "::error::OpenPigeon classes found in the APK — this build is not content-free"
+            unzip -p "$apk" 'classes*.dex' | strings | grep 'Lcom/openbubbles/openpigeon/' | sort -u | head
+            exit 1
+          fi
+          echo "clean: no OpenPigeon classes in the dex"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+  instrumented-compile:
+    # connectedAndroidTest needs a device, which CI has none of. Compiling the suite still catches
+    # the failure mode that matters here — a probe that no longer matches the code it probes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile instrumented tests
+        run: ./gradlew assembleDebugAndroidTest --console=plain

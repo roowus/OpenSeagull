@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The icon OpenBubbles shows in its extension picker.
+
+     It MUST be fully opaque. The host loads this drawable, rasterises it through a Canvas, and
+     compresses the result to JPEG (StatusQuery.kt) — a format with no alpha channel, so any
+     transparent pixel renders black. Hence the explicit background layer rather than letting the
+     gull sit on transparency. XML drawables are fine; no raster asset is required. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/seagull_teal" />
+        </shape>
+    </item>
+
+    <item
+        android:drawable="@drawable/seagull_mark"
+        android:gravity="center"
+        android:inset="18%" />
+
+</layer-list>
