@@ -16,8 +16,9 @@ import org.junit.Test
  * Delegation is already ruled out: every game activity in OpenPigeon's manifest is
  * `android:exported="false"`, which the framework enforces across packages regardless of signature.
  * So their `Activity` has to run in *our* process, from their classes. That is the "harder path",
- * and it has three known obstacles. Each test below measures exactly one of them (obstacle 1 in two
- * parts), because the design that follows depends on which are real and which are folklore.
+ * and it has three known obstacles. Each test below measures exactly one of them (obstacles 1 and 2
+ * in two parts each), because the design that follows depends on which are real and which are
+ * folklore.
  *
  * Nothing here asserts a preferred answer. These tests record findings and pass; a build decision
  * made on a guess is the thing being avoided.
@@ -37,6 +38,14 @@ import org.junit.Test
  *    likely to be fatal, and it is not.
  * 2. **Package ids do collide, but `addAssetPath` is not blocked** (see that test's KDoc). This is
  *    the finding that shapes the design, and it is less damning than expected.
+ * 2b. **A merged table is not usable, and the near-miss is instructive.** With both APKs in one
+ *    `AssetManager`, whichever is added last owns `0x7f`: our `seagull_mark` came back as *their*
+ *    `abc_switch_track_mtrl_alpha`. Reversing the order appeared to fix it — both sample ids resolved
+ *    correctly — but that was one lucky id: `checkers` sits at index `0x0ac`, past the end of our
+ *    smaller drawable type, so it fell through rather than winning. Sweeping their whole drawable
+ *    type found **58 of 379 shadowed**, the first at index `0x000`. So merge order is not a design
+ *    knob, and each side must get a `Resources` containing only its own APK —
+ *    `getResourcesForApplication` for theirs, the process table for ours.
  * 3. **The catalog is mostly Godot: 18 Godot, 7 native, 1 sentinel.** So a native-only host would
  *    reach barely a quarter of the games, and Godot cannot be deferred as a later phase.
  *
@@ -328,6 +337,160 @@ class GameplayFeasibilityProbe {
             }
             record("addAssetPath(their apk) cookie=$cookie (0 or null = refused)")
         }
+    }
+
+    /**
+     * Obstacle 2b: in a merged table, does **their** numeric id still mean their resource?
+     *
+     * This is the question obstacle 2 raised and could not answer. `addAssetPath` accepting their
+     * APK (cookie 14) only proves the paths coexist. It says nothing about what happens next, and
+     * what happens next is the whole design:
+     *
+     * A hosted Activity of theirs does not call `getIdentifier("checkers", …)`. Their aapt2 baked
+     * **integer constants** into their dex — `setContentView(0x7f0b0012)` — and those integers are
+     * all that survives into the running code. So the only question that matters is whether the
+     * merged table maps their integer back to their entry. Two packages both claiming `0x7f` cannot
+     * both win.
+     *
+     * `getResourceName` is the probe because it inverts exactly the lookup the framework does: id
+     * in, package/type/entry out. If their id comes back as their name, hosting can use one merged
+     * `Resources` and no build-time change. If it comes back as *ours*, their layout silently
+     * inflates as one of our drawables — the same silent-wrong-resource failure already measured
+     * from the outside (`0x7f070157`), and the design must instead hand each hosted Activity a
+     * `Resources` containing only their APK, or move our table off `0x7f` with aapt2.
+     *
+     * Deliberately built on a **fresh** AssetManager rather than the process one: mutating the real
+     * table would leave every later test running against a merged table, and a probe should not
+     * change the thing the next probe measures.
+     */
+    @Test
+    fun theirNumericIdsSurviveAMergedTable() {
+        beginSection("obstacle 2b: does their numeric id survive a merged table?")
+        val pigeon = pigeonOrSkip() ?: return
+        val info = try {
+            context().packageManager.getApplicationInfo(pigeon.packageName, 0)
+        } catch (e: PackageManager.NameNotFoundException) {
+            record("SKIP: no ApplicationInfo (${e.javaClass.simpleName})")
+            return
+        }
+
+        // Looked up by name rather than hard-coded: their ids shift between their builds, and a
+        // stale constant would make this test measure nothing while still passing.
+        val theirId = pigeon.resources.getIdentifier("checkers", "drawable", pigeon.packageName)
+        val ourId = context().resources
+            .getIdentifier("seagull_mark", "drawable", context().packageName)
+        record("their checkers = 0x%08x, our seagull_mark = 0x%08x".format(theirId, ourId))
+        if (theirId == 0 || ourId == 0) {
+            record("SKIP: need a sample id from each table")
+            return
+        }
+
+        val merged = try {
+            buildMergedResources(context().applicationInfo.sourceDir, info.sourceDir)
+        } catch (e: ReflectiveOperationException) {
+            record("could not build a merged AssetManager: ${e.cause ?: e}")
+            return
+        }
+
+        // The inverse lookup: whichever package owns 0x7f in the merged table is the one whose
+        // names come back. Both ids are asked, because "theirs resolves" is only meaningful
+        // alongside what happened to ours.
+        fun nameOf(res: Resources, id: Int) = try {
+            res.getResourceName(id)
+        } catch (e: Resources.NotFoundException) {
+            "NOT FOUND"
+        }
+        val theirName = nameOf(merged, theirId)
+        val ourName = nameOf(merged, ourId)
+        record("merged table: their id -> $theirName")
+        record("merged table: our  id -> $ourName")
+
+        val theirsWon = theirName.startsWith(pigeon.packageName)
+        val oursWon = ourName.startsWith(context().packageName)
+        record(
+            when {
+                theirsWon && oursWon ->
+                    "VERDICT: both resolve — ids do not actually collide, one merged Resources works"
+                theirsWon ->
+                    "VERDICT: theirs won 0x7f — our own resources are the ones that break"
+                oursWon ->
+                    "VERDICT: ours won 0x7f — their layouts would silently inflate as our drawables"
+                else ->
+                    "VERDICT: neither resolved — the merged table is not usable as built"
+            },
+        )
+
+        // Is the winner something we choose, or something imposed on us? A table built the other
+        // way round separates "last path added wins" — which a host controls by construction —
+        // from "theirs wins regardless", which would mean the merge order is not a design knob at
+        // all. The answer changes what the fix has to be, so it is worth one more AssetManager.
+        val reversed = try {
+            buildMergedResources(info.sourceDir, context().applicationInfo.sourceDir)
+        } catch (e: ReflectiveOperationException) {
+            record("could not build the reversed table: ${e.cause ?: e}")
+            return
+        }
+        record("reversed order: their id -> ${nameOf(reversed, theirId)}")
+        record("reversed order: our  id -> ${nameOf(reversed, ourId)}")
+
+        // The reversed table looks like it fixed everything, and reading it that way would be the
+        // expensive mistake in this whole file. `checkers` is at index 0x0ac; our drawable type is
+        // smaller than that, so the lookup may simply be running off the end of our table and
+        // falling through to theirs — correct by accident, for that one id.
+        //
+        // If that is the mechanism, their drawables at indices our table *does* cover are still
+        // shadowed. One id cannot tell the difference between "ordering fixes it" and "this id got
+        // lucky", so their whole drawable type is swept and the mismatches counted.
+        var checked = 0
+        var wrong = 0
+        var firstWrong: String? = null
+        for (index in 0 until 0x400) {
+            val id = 0x7f070000 or index
+            val truth = try {
+                pigeon.resources.getResourceName(id)
+            } catch (e: Resources.NotFoundException) {
+                continue // not one of their drawables; nothing to get wrong
+            }
+            checked++
+            val got = nameOf(reversed, id)
+            if (got != truth) {
+                wrong++
+                if (firstWrong == null) firstWrong = "0x%08x theirs=$truth merged=$got".format(id)
+            }
+        }
+        record("reversed order: swept $checked of their drawables, $wrong resolve to the wrong entry")
+        firstWrong?.let { record("  first mismatch: $it") }
+        record(
+            if (wrong == 0) {
+                "VERDICT: order alone fixes it — their APK first, ours second, no id is shadowed"
+            } else {
+                "VERDICT: order does NOT fix it — $wrong/$checked shadowed; the earlier pass was " +
+                    "one lucky id. Hosting needs a single-package Resources per side."
+            },
+        )
+    }
+
+    /**
+     * A [Resources] over a fresh [AssetManager] holding [apks] in order, via the hidden
+     * `AssetManager()` constructor and `addAssetPath`.
+     *
+     * The display metrics and configuration are copied from the process `Resources` so the table
+     * selects the same density and locale buckets a real Activity would get — a merged table that
+     * silently resolved `mdpi` art would answer a different question than the one being asked.
+     */
+    @Throws(ReflectiveOperationException::class)
+    private fun buildMergedResources(vararg apks: String): Resources {
+        val assets = AssetManager::class.java.getDeclaredConstructor()
+            .apply { isAccessible = true }
+            .newInstance()
+        val addAssetPath = AssetManager::class.java.getMethod("addAssetPath", String::class.java)
+        apks.forEach { apk ->
+            val cookie = addAssetPath.invoke(assets, apk) as? Int
+            record("  merged AssetManager += $apk -> cookie=$cookie")
+        }
+        val base = context().resources
+        @Suppress("DEPRECATION")
+        return Resources(assets, base.displayMetrics, base.configuration)
     }
 
     /**
