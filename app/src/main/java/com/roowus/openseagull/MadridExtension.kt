@@ -11,19 +11,26 @@ import com.bluebubbles.messaging.IMadridExtension
 import com.bluebubbles.messaging.IMessageViewHandle
 import com.bluebubbles.messaging.IViewUpdateCallback
 import com.bluebubbles.messaging.MadridMessage
+import com.roowus.openseagull.host.ForeignCallException
+import com.roowus.openseagull.host.ForeignGame
 import com.roowus.openseagull.host.ForeignGameCatalog
 import com.roowus.openseagull.host.InstalledOpenPigeon
 import com.roowus.openseagull.ui.GamePicker
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * OpenSeagull's implementation of the OpenBubbles extension contract.
  *
  * ## Scope of this version
  *
- * The keyboard now renders a real, paginated grid of the games found in the user's installed
- * OpenPigeon, drawn with their own poster art. Tapping a game is recognised and logged but does
- * not yet start it — see [launchGame] — and the live view for a received game is still the status
- * view rather than a board.
+ * The keyboard renders a real, paginated grid of the games found in the user's installed
+ * OpenPigeon, drawn with their own poster art, and tapping a game **sends** it — which is what a
+ * picker tap does in OpenPigeon too, rather than opening a board (see [launchGame]).
+ *
+ * What is still missing is the other half: tapping a balloon to *play*. [didTapTemplate] is a
+ * no-op and [getLiveView] returns the status view rather than a board. Sending is the half that
+ * needs no hosted Activity and no game engine, which is why it is the half that works first.
  *
  * Methods that cannot yet do their job return a status view rather than a stub or an exception, so
  * a bind from OpenBubbles always produces something legible on screen. Where a method is
@@ -56,7 +63,36 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
      */
     private var picker: GamePicker? = null
 
+    /**
+     * The host's send channel, and the only way a composed game reaches the conversation.
+     *
+     * Handed to us once per keyboard session and valid only for that session, so it is cleared in
+     * [keyboardClosed] alongside everything else. Holding a stale handle would mean posting a
+     * balloon into a conversation the user has already left.
+     */
+    private var keyboardHandle: IKeyboardHandle? = null
+
+    /**
+     * How many people are in this conversation, as the host reports it.
+     *
+     * Recorded because [ForeignGame.minPlayerRequirement] is checked against it — their own
+     * `ChooseGameCallback` refuses to compose a game whose minimum exceeds this, and a picker that
+     * skipped the check would post balloons OpenPigeon itself would not have sent.
+     */
+    private var userCount: Int = 0
+
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Where game composition runs.
+     *
+     * [launchGame] is reached from a `BroadcastReceiver`, i.e. on our main thread under the
+     * receiver time limit, and composing is not cheap: their `buildGameMessage` runs the payload
+     * through `Cryption.encrypt` and renders a JPEG poster — measured at 89172 base64 chars for
+     * pool. Single-threaded so that two fast taps compose in the order they were tapped rather
+     * than racing.
+     */
+    private val composer: ExecutorService = Executors.newSingleThreadExecutor()
 
     override fun keyboardOpened(
         callback: IViewUpdateCallback?,
@@ -64,6 +100,8 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         userCount: Int,
     ): RemoteViews {
         this.callback = callback
+        this.keyboardHandle = handle
+        this.userCount = userCount
 
         val p = pigeon ?: return statusView()
         val catalog = ForeignGameCatalog.of(p)
@@ -77,6 +115,8 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
     override fun keyboardClosed() {
         callback = null
         picker = null
+        keyboardHandle = null
+        userCount = 0
     }
 
     /**
@@ -108,13 +148,88 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
     }
 
     /**
-     * Start a game. Not yet implemented — see [didTapTemplate] for why this is the hard part.
+     * Send a new game into the conversation, which is what tapping a picker cell actually does.
      *
-     * The tap is logged rather than silently ignored so that "the grid is wired" and "the grid is
-     * decorative" are distinguishable from outside the process: `adb logcat -s SEAGULL:I`.
+     * Reading OpenPigeon's own `ChooseGameCallback` settled something this project had backwards:
+     * a picker tap does **not** open a game. It calls
+     * `game.buildGameMessage(context, game.getNewGameData(context), null)` and hands the result to
+     * `addMessage` — it composes a balloon and posts it. Opening a board is what happens when you
+     * tap an *existing* balloon, which is [didTapTemplate] and still unwired.
+     *
+     * So this path needs no hosted Activity, no dex injection and no Godot engine. It needs one
+     * thing nothing else here has done: carry an object built by **their** code into a binder call
+     * made by **ours**, which is what [ParcelBridge] exists for.
+     *
+     * Everything after the lookup runs on [composer] rather than the receiver's thread, because
+     * `buildGameMessage` encrypts a payload and renders a poster.
      */
     fun launchGame(name: String) {
-        Log.i(TAG, "launch requested for '$name' — gameplay not wired up yet")
+        val handle = keyboardHandle ?: run {
+            Log.w(TAG, "launch tap with no keyboard handle — dropping '$name'")
+            return
+        }
+        val p = pigeon ?: run {
+            Log.w(TAG, "launch tap but OpenPigeon is gone — dropping '$name'")
+            return
+        }
+        val game = ForeignGameCatalog.of(p).byName(name) ?: run {
+            Log.w(TAG, "launch tap for unknown game '$name' — dropping")
+            return
+        }
+
+        // Their own callback refuses here rather than composing, so we do too. Measured across the
+        // installed catalog only `crazy` (Crazy 8s) sets a minimum, at 3.
+        val min = game.minPlayerRequirement()
+        if (min > userCount) {
+            Log.i(TAG, "'$name' needs $min players, conversation has $userCount — refusing")
+            return
+        }
+        // 17 of 26 games have a configuration step we have not built. Sending the default game is
+        // the honest partial behaviour — it produces a real, playable balloon — but it is not what
+        // their picker would have done, so it is recorded rather than passed over in silence.
+        if (game.isConfigurable()) {
+            Log.i(TAG, "'$name' is configurable; sending defaults (setup UI not built)")
+        }
+
+        composer.execute { composeAndSend(game, handle, name) }
+    }
+
+    /**
+     * Compose [game] and post it, off the main thread.
+     *
+     * [ForeignCallException] is caught by name because it is precisely the signal that *their* code
+     * threw rather than ours: a failure inside `buildGameMessage` says the installed OpenPigeon
+     * disagrees with what we expected of it, and that is a log line and a dropped tap, not a crash
+     * in the host's keyboard.
+     */
+    private fun composeAndSend(game: ForeignGame, handle: IKeyboardHandle, name: String) {
+        val message = try {
+            val data = game.newGameData() ?: run {
+                Log.w(TAG, "'$name' produced no new-game data — nothing to send")
+                return
+            }
+            game.buildMessage(data, session = null) ?: run {
+                Log.w(TAG, "'$name' built no message — nothing to send")
+                return
+            }
+        } catch (e: ForeignCallException) {
+            Log.w(TAG, "OpenPigeon threw while composing '$name'", e)
+            return
+        }
+
+        // Sizes only: `url` is ciphertext from their Cryption and the poster is a base64 JPEG.
+        Log.i(
+            TAG,
+            "sending '$name': url=${message.url?.length ?: 0} chars, " +
+                "image=${message.imageBase64?.length ?: 0} chars",
+        )
+        try {
+            handle.addMessage(message)
+        } catch (e: RemoteException) {
+            // `addMessage` is oneway, so this means the host process died rather than that it
+            // rejected the message — there is no error channel that could tell us the latter.
+            Log.w(TAG, "host went away during addMessage for '$name'", e)
+        }
     }
 
     /**
@@ -182,6 +297,17 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
 
     override fun messageUpdated(message: MadridMessage?) {
         // No sessions are tracked yet, so there is nothing to update.
+    }
+
+    /**
+     * Release the compose thread. Called when the service holding this extension goes away.
+     *
+     * `shutdown()` rather than `shutdownNow()`: a compose already in flight has either sent its
+     * balloon or is about to, and interrupting it mid-`buildGameMessage` would abandon a tap the
+     * user made. There is at most one, and it finishes in well under a second.
+     */
+    fun release() {
+        composer.shutdown()
     }
 
     /**

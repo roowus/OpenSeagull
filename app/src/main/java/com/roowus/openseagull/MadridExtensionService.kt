@@ -53,6 +53,7 @@ class MadridExtensionService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        extension?.release()
         extension = null
     }
 }

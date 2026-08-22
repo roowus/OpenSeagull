@@ -9,6 +9,7 @@ import com.bluebubbles.messaging.MadridMessage
 import com.roowus.openseagull.host.ForeignAppContext
 import com.roowus.openseagull.host.ForeignGameCatalog
 import com.roowus.openseagull.host.InstalledOpenPigeon
+import com.roowus.openseagull.host.ParcelBridge
 import org.junit.Test
 import kotlin.test.assertNotNull
 
@@ -324,25 +325,64 @@ class SendGameProbe {
     }
 
     /**
-     * Carry a foreign [Parcelable] into one of our own classes.
+     * Carry a foreign [Parcelable] into one of our own classes, via the **shipped** bridge.
      *
-     * This works only because of what [Parcel] is: a byte buffer plus a position, with no notion of
-     * types. Their instance writes its fields through [Parcelable.writeToParcel] — an interface
-     * defined by the framework, so both apps genuinely share it — and our `CREATOR` reads the same
-     * bytes back. No class is ever shared, so no `ClassCastException` is possible.
+     * This deliberately delegates rather than reimplementing. An earlier version of this file
+     * carried its own copy of the parcel dance, which meant a green test proved only that *the
+     * test's* copy worked — the shipped [ParcelBridge] could have drifted (a missing
+     * `setDataPosition(0)`, say, whose failure mode is a blank balloon and no error) with nothing
+     * here to catch it. Calling the real one is what makes these assertions a gate.
      *
-     * `setDataPosition(0)` between the two halves is not optional: writing leaves the cursor at the
-     * end, and reading from there would produce a message with every field null and no error.
+     * The size log is kept because it is genuinely useful — 180152 bytes for pool, almost all of it
+     * poster — and measuring it needs a parcel of our own, which costs one extra write.
      */
     private fun bridge(theirs: Parcelable): MadridMessage {
         val parcel = Parcel.obtain()
-        return try {
+        try {
             theirs.writeToParcel(parcel, 0)
             Log.i(tag, "parcelled their message = ${parcel.dataSize()} bytes")
-            parcel.setDataPosition(0)
-            MadridMessage.CREATOR.createFromParcel(parcel)
         } finally {
             parcel.recycle()
         }
+        return ParcelBridge.toOurs(theirs)
+    }
+
+    /**
+     * The accessors [MadridExtension.launchGame] actually calls, exercised as a unit.
+     *
+     * The tests above prove the *technique* works by driving reflection inline. This one proves
+     * that [ForeignGame]'s wrappers around that technique work — that the method names, parameter
+     * arrays and Context choice baked into production match the installed OpenPigeon. Those are
+     * separate claims: every inline `getMethod` above could be right while a typo'd name in
+     * `ForeignGame` returns null and the send path silently drops every tap.
+     */
+    @Test
+    fun theShippedAccessorsComposeAMessage() {
+        val p = pigeonOrSkip() ?: return
+        val game = ForeignGameCatalog.of(p).games.firstOrNull { it.name == "pool" }
+            ?: ForeignGameCatalog.of(p).games.first()
+
+        Log.i(
+            tag,
+            "accessors for '${game.name}': minPlayers=${game.minPlayerRequirement()} " +
+                "configurable=${game.isConfigurable()}",
+        )
+
+        val data = game.newGameData()
+        assertNotNull(data, "ForeignGame.newGameData returned null — the send path is dead")
+
+        val message = game.buildMessage(data, session = null)
+        assertNotNull(message, "ForeignGame.buildMessage returned null — nothing would be sent")
+
+        // The same three fields the raw-reflection test asserts. If these hold here too, the
+        // wrappers are faithful; if only the raw test holds, the wrappers are the bug.
+        assertNotNull(message.messageGuid, "shipped path lost the guid")
+        assertNotNull(message.session, "shipped path lost the session")
+        val url = message.url
+        assertNotNull(url, "shipped path lost the url")
+        assert(url.startsWith("data:?ver=")) {
+            "shipped path produced a malformed url starting '${url.take(12)}'"
+        }
+        Log.i(tag, "shipped path OK: url=${url.length} chars, isLive=${message.isLive}")
     }
 }

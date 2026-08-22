@@ -2,6 +2,8 @@ package com.roowus.openseagull.host
 
 import android.content.Context
 import android.graphics.drawable.Drawable
+import android.os.Parcelable
+import com.bluebubbles.messaging.MadridMessage
 
 /**
  * One game from the installed OpenPigeon, reachable only by reflection.
@@ -67,6 +69,87 @@ class ForeignGame internal constructor(
         arrayOf(Context::class.java),
         arrayOf<Any?>(pigeon.packageContext),
     ) as? String
+
+    /**
+     * The Context handed to their game-logic calls.
+     *
+     * [senderUuid] gets away with the bare [InstalledOpenPigeon.packageContext] because it only
+     * reads prefs. Anything that reaches their settings layer does not: `SettingsData.init` does
+     * `appContext = context.applicationContext` into a non-null Kotlin type, and a Context from
+     * `createPackageContext` has no application object, so the framework's null is rejected at the
+     * call boundary. [ForeignAppContext] answers that one question and delegates everything else,
+     * so their resource ids and package name still resolve against their own APK.
+     *
+     * One instance, held for the life of this game object, because their settings layer stores
+     * whatever it is handed and a fresh wrapper per call would leave stale references behind.
+     */
+    private val appContext: Context by lazy { ForeignAppContext(pigeon.packageContext) }
+
+    /**
+     * How many people must be in the conversation before this game can be sent.
+     *
+     * Their own `ChooseGameCallback` checks this before composing anything and refuses with a toast
+     * rather than sending, so our picker has to make the same decision or it will post balloons
+     * their app would not have.
+     *
+     * Measured across the installed catalog: 25 of 26 games report `0`, and only `crazy`
+     * (Crazy 8s) reports `3`. A default of `0` on a missing method is therefore the permissive
+     * answer that matches every game we know about.
+     */
+    fun minPlayerRequirement(): Int =
+        klass.invokeOrNull(instance, "minPlayerRequirement") as? Int ?: 0
+
+    /**
+     * Whether tapping this game opens a setup step instead of sending immediately.
+     *
+     * Measured: 17 of 26 games report `true`. We do not yet have their configuration UI, so this is
+     * read to *record* the divergence rather than to act on it — see [MadridExtension.launchGame],
+     * which sends the default game and says so.
+     */
+    fun isConfigurable(): Boolean =
+        klass.invokeOrNull(instance, "isConfigurable") as? Boolean ?: false
+
+    /**
+     * Compose the payload for a brand-new game.
+     *
+     * Not a pure getter: their implementation calls `Cryption.getId()`, builds an avatar string,
+     * and reads the sender identity out of prefs. Measured on-device for `pool`, this returns 19
+     * keys including `game`, `version`, `player`, `sender` and an avatar blob.
+     *
+     * Null means their code declined or the method is gone — either way there is nothing to send,
+     * and the caller must not fabricate a substitute.
+     */
+    fun newGameData(): Map<*, *>? = klass.invokeOrNull(
+        instance,
+        "getNewGameData",
+        arrayOf(Context::class.java),
+        arrayOf<Any?>(appContext),
+    ) as? Map<*, *>
+
+    /**
+     * Build the balloon for [data], returning **our** `MadridMessage`.
+     *
+     * Their `buildGameMessage` returns a `MadridMessage` loaded by *their* ClassLoader, which is an
+     * unrelated type to ours and cannot be cast — measured, `assignable theirs->ours = false`. So
+     * the result is copied through [ParcelBridge], which is possible only because `Parcelable`
+     * comes from the boot loader both apps share.
+     *
+     * [session] is their existing-session id, or `null` for a new game.
+     *
+     * The return is deliberately not sanity-checked here beyond the type: what a well-formed
+     * message looks like (`url` carrying a `data:?ver=` payload, a non-null `session` and
+     * `messageGuid`) is asserted in `SendGameProbe`, where a failure is a test result rather than a
+     * silently blank balloon in a user's conversation.
+     */
+    fun buildMessage(data: Map<*, *>, session: String?): MadridMessage? {
+        val theirs = klass.invokeOrNull(
+            instance,
+            "buildGameMessage",
+            arrayOf(Context::class.java, Map::class.java, String::class.java),
+            arrayOf(appContext, data, session),
+        ) as? Parcelable ?: return null
+        return ParcelBridge.toOurs(theirs)
+    }
 
     override fun toString(): String = "ForeignGame(${name ?: klass.name})"
 }
