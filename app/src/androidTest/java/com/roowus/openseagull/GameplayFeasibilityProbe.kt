@@ -16,8 +16,8 @@ import org.junit.Test
  * Delegation is already ruled out: every game activity in OpenPigeon's manifest is
  * `android:exported="false"`, which the framework enforces across packages regardless of signature.
  * So their `Activity` has to run in *our* process, from their classes. That is the "harder path",
- * and it has three known obstacles. Each test below measures exactly one of them, because the
- * design that follows depends on which are real and which are folklore.
+ * and it has three known obstacles. Each test below measures exactly one of them (obstacle 1 in two
+ * parts), because the design that follows depends on which are real and which are folklore.
  *
  * Nothing here asserts a preferred answer. These tests record findings and pass; a build decision
  * made on a guess is the thing being avoided.
@@ -29,6 +29,12 @@ import org.junit.Test
  *    `GodotGameActivity` through `GodotActivity`, from a loader parented to ours. The engine is
  *    there too (`org.godotengine.godot.Godot`). Walking the superclass chain forces linkage, so
  *    this is stronger than "the name resolved" — nothing they inherit from is missing here.
+ * 1b. **And they load from the loader that actually matters.** Appending their APK to our own app
+ *    ClassLoader's `DexPathList` is **not blocked** on API 36: before injection our loader could not
+ *    resolve `KnockoutActivity`, after it resolves *and links*. That is the loader the framework
+ *    passes to `Instrumentation.newActivity`, so the manifest-entry route is open — hosting does not
+ *    need a hand-rolled proxy that drives the Activity lifecycle itself. This was the obstacle most
+ *    likely to be fatal, and it is not.
  * 2. **Package ids do collide, but `addAssetPath` is not blocked** (see that test's KDoc). This is
  *    the finding that shapes the design, and it is less damning than expected.
  * 3. **The catalog is mostly Godot: 18 Godot, 7 native, 1 sentinel.** So a native-only host would
@@ -150,6 +156,111 @@ class GameplayFeasibilityProbe {
             }
             record("loadable $fqcn -> $result")
         }
+    }
+
+    /**
+     * Obstacle 1b: can their dex be reached from **our own** app ClassLoader?
+     *
+     * Obstacle 1 showed their classes load from a loader *we* construct. That is not the loader
+     * that matters. When the framework instantiates an Activity it calls
+     * `Instrumentation.newActivity(cl, className, intent)` with `cl` = the `LoadedApk` ClassLoader —
+     * ours, fixed at process start. A loader we build and hold in a field is invisible to it, so
+     * obstacle 1 passing does not mean a manifest entry naming their Activity would launch.
+     *
+     * The standard way to close that gap is to append their APK to our loader's `DexPathList`, the
+     * mechanism every multidex and hotfix library has used for a decade. Whether it still works on
+     * API 36 is the question — `dalvik.system.DexPathList` is a non-SDK class, and the reflective
+     * access could be greylisted, blocked, or the field renamed out from under this.
+     *
+     * This does not assert success. Being blocked here is a legitimate finding: it would mean the
+     * manifest-entry route is closed and hosting needs a different shape entirely (a proxy Activity
+     * of ours that instantiates theirs by hand and drives its lifecycle, which is far more code).
+     * Either way the answer should come from the device.
+     */
+    @Test
+    fun theirDexCanBeAppendedToOurOwnClassLoader() {
+        beginSection("obstacle 1b: is their dex reachable from OUR app ClassLoader?")
+        val pigeon = pigeonOrSkip() ?: return
+        val info = try {
+            context().packageManager.getApplicationInfo(pigeon.packageName, 0)
+        } catch (e: PackageManager.NameNotFoundException) {
+            record("SKIP: no ApplicationInfo (${e.javaClass.simpleName})")
+            return
+        }
+
+        val target = "com.openbubbles.openpigeon.knockout.KnockoutActivity"
+        val ours = context().classLoader
+        record("our loader = ${ours.javaClass.name}")
+
+        // Baseline. If this somehow already resolves, everything below is moot — and a false
+        // "injection worked" would be the easiest wrong conclusion to draw here.
+        val before = try {
+            ours.loadClass(target); true
+        } catch (e: ClassNotFoundException) {
+            false
+        }
+        record("before injection: our loader resolves $target = $before")
+        if (before) {
+            record("NOTE: already reachable — injection result below proves nothing")
+            return
+        }
+
+        val added = try {
+            appendApkToLoader(ours, info.sourceDir)
+            "ok"
+        } catch (e: ReflectiveOperationException) {
+            "blocked: ${e.cause ?: e}"
+        } catch (e: RuntimeException) {
+            "blocked: $e"
+        }
+        record("append their apk to our DexPathList -> $added")
+
+        val after = try {
+            val k = ours.loadClass(target)
+            generateSequence<Class<*>>(k) { it.superclass }.take(4).joinToString(" <- ") {
+                it.simpleName
+            }
+        } catch (e: ClassNotFoundException) {
+            "still ABSENT"
+        } catch (e: LinkageError) {
+            "UNLINKABLE (${e.javaClass.simpleName})"
+        }
+        record("after injection: our loader resolves $target -> $after")
+    }
+
+    /**
+     * Appends [apkPath] to [loader]'s `DexPathList`, the trick every multidex and hotfix library
+     * has used for a decade.
+     *
+     * Rather than call `makePathElements` — whose signature has changed repeatedly across releases —
+     * this builds a throwaway [PathClassLoader] over their APK and steals its already-constructed
+     * elements. Far more version-tolerant, and shorter.
+     *
+     * Throws rather than reporting: the caller records the failure as a finding, because being
+     * blocked here is itself the answer to the question this test asks.
+     */
+    @Throws(ReflectiveOperationException::class)
+    private fun appendApkToLoader(loader: ClassLoader, apkPath: String) {
+        val pathListField = Class.forName("dalvik.system.BaseDexClassLoader")
+            .getDeclaredField("pathList").apply { isAccessible = true }
+        val pathList = pathListField.get(loader)
+
+        val dexElementsField = pathList.javaClass
+            .getDeclaredField("dexElements").apply { isAccessible = true }
+        val existing = dexElementsField.get(pathList) as Array<*>
+
+        val donor = PathClassLoader(apkPath, null, null)
+        val donorElements = dexElementsField.get(pathListField.get(donor)) as Array<*>
+
+        // Ours first: anything both APKs define (androidx, kotlin stdlib) keeps resolving to our
+        // copy, so appending their dex cannot change the meaning of code that already worked.
+        val merged = java.lang.reflect.Array.newInstance(
+            existing.javaClass.componentType,
+            existing.size + donorElements.size,
+        )
+        System.arraycopy(existing, 0, merged, 0, existing.size)
+        System.arraycopy(donorElements, 0, merged, existing.size, donorElements.size)
+        dexElementsField.set(pathList, merged)
     }
 
     /**
