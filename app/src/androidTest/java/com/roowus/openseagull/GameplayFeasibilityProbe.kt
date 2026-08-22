@@ -38,14 +38,20 @@ import org.junit.Test
  *    likely to be fatal, and it is not.
  * 2. **Package ids do collide, but `addAssetPath` is not blocked** (see that test's KDoc). This is
  *    the finding that shapes the design, and it is less damning than expected.
- * 2b. **A merged table is not usable, and the near-miss is instructive.** With both APKs in one
- *    `AssetManager`, whichever is added last owns `0x7f`: our `seagull_mark` came back as *their*
- *    `abc_switch_track_mtrl_alpha`. Reversing the order appeared to fix it — both sample ids resolved
- *    correctly — but that was one lucky id: `checkers` sits at index `0x0ac`, past the end of our
- *    smaller drawable type, so it fell through rather than winning. Sweeping their whole drawable
- *    type found **58 of 379 shadowed**, the first at index `0x000`. So merge order is not a design
- *    knob, and each side must get a `Resources` containing only its own APK —
- *    `getResourcesForApplication` for theirs, the process table for ours.
+ * 2b. **The id collision was real, and is now fixed at the root by our build.** With both APKs in
+ *    one `AssetManager` and both tables on the default `0x7f`, whichever is added last owns the id
+ *    space: our `seagull_mark` came back as *their* `abc_switch_track_mtrl_alpha`. Reversing the
+ *    order appeared to fix it — both sample ids resolved correctly — but that was one lucky id:
+ *    `checkers` sits at index `0x0ac`, past the end of our smaller drawable type, so it fell
+ *    through rather than winning. Sweeping their whole drawable type found **58 of 379 shadowed**,
+ *    the first at index `0x000`, which is what killed the "just add their APK last" reading.
+ *
+ *    The answer was not to work around it per-side but to vacate `0x7f`: our table is now built at
+ *    package id `0x80` (`--package-id 0x80 --allow-reserved-package-id`, see `app/build.gradle.kts`
+ *    for the full reasoning). Re-running this same sweep against that build reports **0 of 379
+ *    shadowed in both merge orders**, so a single merged `Resources` is usable and hosting does not
+ *    have to hand each side its own table. Keep this test: it is the regression guard on that build
+ *    flag, and if the flag is ever dropped the count goes back to 58 with no other symptom.
  * 3. **The catalog is mostly Godot: 18 Godot, 7 native, 1 sentinel.** So a native-only host would
  *    reach barely a quarter of the games, and Godot cannot be deferred as a later phase.
  *
@@ -392,8 +398,20 @@ class GameplayFeasibilityProbe {
             return
         }
 
-        // The inverse lookup: whichever package owns 0x7f in the merged table is the one whose
-        // names come back. Both ids are asked, because "theirs resolves" is only meaningful
+        // The top byte of an id *is* the package id, so this is the whole hypothesis in one line:
+        // if ours is not 0x7f there is no id space to fight over. Read from the built resource
+        // rather than asserted, so the record says what this APK actually is, not what the build
+        // file intends it to be.
+        val ourPackageId = ourId ushr 24
+        record(
+            "our package id = 0x%02x (%s)".format(
+                ourPackageId,
+                if (ourPackageId == 0x7f) "default — collides with theirs" else "relocated off 0x7f",
+            ),
+        )
+
+        // The inverse lookup: whichever package owns an id range in the merged table is the one
+        // whose names come back. Both ids are asked, because "theirs resolves" is only meaningful
         // alongside what happened to ours.
         fun nameOf(res: Resources, id: Int) = try {
             res.getResourceName(id)
@@ -410,20 +428,21 @@ class GameplayFeasibilityProbe {
         record(
             when {
                 theirsWon && oursWon ->
-                    "VERDICT: both resolve — ids do not actually collide, one merged Resources works"
+                    "VERDICT: both resolve — one merged Resources works"
                 theirsWon ->
-                    "VERDICT: theirs won 0x7f — our own resources are the ones that break"
+                    "VERDICT: theirs won — our own resources are the ones that break"
                 oursWon ->
-                    "VERDICT: ours won 0x7f — their layouts would silently inflate as our drawables"
+                    "VERDICT: ours won — their layouts would silently inflate as our drawables"
                 else ->
                     "VERDICT: neither resolved — the merged table is not usable as built"
             },
         )
 
-        // Is the winner something we choose, or something imposed on us? A table built the other
-        // way round separates "last path added wins" — which a host controls by construction —
-        // from "theirs wins regardless", which would mean the merge order is not a design knob at
-        // all. The answer changes what the fix has to be, so it is worth one more AssetManager.
+        // Built the other way round because sample ids resolving correctly is not the same claim as
+        // the table being sound. If the two packages still shared 0x7f, this would separate "last
+        // path added wins" — something a host controls by construction — from "theirs wins
+        // regardless". With our table relocated it should simply not matter, and an order that
+        // *did* matter would mean the relocation had not taken.
         val reversed = try {
             buildMergedResources(info.sourceDir, context().applicationInfo.sourceDir)
         } catch (e: ReflectiveOperationException) {
@@ -433,39 +452,52 @@ class GameplayFeasibilityProbe {
         record("reversed order: their id -> ${nameOf(reversed, theirId)}")
         record("reversed order: our  id -> ${nameOf(reversed, ourId)}")
 
-        // The reversed table looks like it fixed everything, and reading it that way would be the
-        // expensive mistake in this whole file. `checkers` is at index 0x0ac; our drawable type is
-        // smaller than that, so the lookup may simply be running off the end of our table and
-        // falling through to theirs — correct by accident, for that one id.
+        // Two ids agreeing proves nothing, and reading it as proof would be the expensive mistake
+        // in this whole file. When both tables sat on 0x7f, `checkers` at index 0x0ac was past the
+        // end of our smaller drawable type, so it fell through to theirs — correct by accident.
+        // Their drawables at indices our table *did* cover were still shadowed: 58 of 379, the
+        // first at index 0x000. One id cannot tell "the collision is gone" from "this id got
+        // lucky", so their whole drawable type is swept in both orders and the mismatches counted.
         //
-        // If that is the mechanism, their drawables at indices our table *does* cover are still
-        // shadowed. One id cannot tell the difference between "ordering fixes it" and "this id got
-        // lucky", so their whole drawable type is swept and the mismatches counted.
-        var checked = 0
-        var wrong = 0
-        var firstWrong: String? = null
-        for (index in 0 until 0x400) {
-            val id = 0x7f070000 or index
-            val truth = try {
-                pigeon.resources.getResourceName(id)
-            } catch (e: Resources.NotFoundException) {
-                continue // not one of their drawables; nothing to get wrong
+        // This sweep is now the regression guard on the --package-id 0x80 build flag. Drop the flag
+        // and the count returns to 58 with no other symptom anywhere — no exception, just wrong
+        // pictures in a hosted Activity.
+        fun sweep(res: Resources, label: String): Int {
+            var checked = 0
+            var wrong = 0
+            var firstWrong: String? = null
+            for (index in 0 until 0x400) {
+                val id = 0x7f070000 or index
+                val truth = try {
+                    pigeon.resources.getResourceName(id)
+                } catch (e: Resources.NotFoundException) {
+                    continue // not one of their drawables; nothing to get wrong
+                }
+                checked++
+                val got = nameOf(res, id)
+                if (got != truth) {
+                    wrong++
+                    if (firstWrong == null) firstWrong = "0x%08x theirs=$truth merged=$got".format(id)
+                }
             }
-            checked++
-            val got = nameOf(reversed, id)
-            if (got != truth) {
-                wrong++
-                if (firstWrong == null) firstWrong = "0x%08x theirs=$truth merged=$got".format(id)
-            }
+            record("$label: swept $checked of their drawables, $wrong resolve to the wrong entry")
+            firstWrong?.let { record("  first mismatch: $it") }
+            return wrong
         }
-        record("reversed order: swept $checked of their drawables, $wrong resolve to the wrong entry")
-        firstWrong?.let { record("  first mismatch: $it") }
+        val wrongOursFirst = sweep(merged, "ours first")
+        val wrongTheirsFirst = sweep(reversed, "theirs first")
         record(
-            if (wrong == 0) {
-                "VERDICT: order alone fixes it — their APK first, ours second, no id is shadowed"
-            } else {
-                "VERDICT: order does NOT fix it — $wrong/$checked shadowed; the earlier pass was " +
-                    "one lucky id. Hosting needs a single-package Resources per side."
+            when {
+                wrongOursFirst == 0 && wrongTheirsFirst == 0 ->
+                    "VERDICT: no id is shadowed in either order — a single merged Resources is " +
+                        "usable, and hosting needs no per-side table"
+                wrongTheirsFirst == 0 ->
+                    "VERDICT: order-dependent — $wrongOursFirst shadowed with ours first, 0 with " +
+                        "theirs first. Sound only while the host controls merge order."
+                else ->
+                    "VERDICT: shadowed in both orders ($wrongOursFirst ours-first, " +
+                        "$wrongTheirsFirst theirs-first) — check the --package-id 0x80 flag " +
+                        "survived into this build"
             },
         )
     }

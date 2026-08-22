@@ -38,6 +38,30 @@ android {
         }
     }
 
+    // Our resource table lives at package id 0x80, not the default 0x7f. This is load-bearing for
+    // hosting, and it is the one build setting here that exists for a measured reason.
+    //
+    // Hosting one of OpenPigeon's Activities in our process means their code and ours drawing from
+    // one AssetManager. Their aapt2 baked *integer* ids into their dex — setContentView(0x7f0b0012)
+    // — so a merged table has to map their integer back to their entry. With both apps on the
+    // default 0x7f it cannot: whichever APK is added last owns the id space, and the loser's ids
+    // silently resolve to the winner's resources. Not an exception — a wrong picture, no stack
+    // trace. GameplayFeasibilityProbe measured 58 of their 379 drawables shadowed this way.
+    //
+    // 0x7f is the app id and 0x01 is the framework's; everything between is nominally reserved,
+    // which is what --allow-reserved-package-id is acknowledging. Reserved is not the same as
+    // unavailable, and this is the mechanism every Android plugin framework uses for exactly this
+    // problem. It is verified rather than assumed: with our table at 0x80 the same sweep reports
+    // 0 of 379 shadowed in *both* merge orders, the app runs, and PickerRenderProbe still inflates
+    // the full grid across a parcel — which is the check that matters, since RemoteViews ids are
+    // resolved in OpenBubbles' process and not ours.
+    //
+    // Nothing may hard-code 0x7f-prefixed constants of ours. Nothing does: our ids reach the host
+    // as R fields, which move with the table.
+    androidResources {
+        additionalParameters += listOf("--package-id", "0x80", "--allow-reserved-package-id")
+    }
+
     buildFeatures {
         aidl = true
         buildConfig = true
