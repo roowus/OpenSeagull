@@ -110,11 +110,61 @@ class ForeignGame internal constructor(
         klass.invokeOrNull(instance, "isConfigurable") as? Boolean ?: false
 
     /**
+     * The `Activity` class that plays this game, from *their* dex.
+     *
+     * `Class<*>` rather than a name because that is what their interface returns and what an
+     * `Intent` constructor takes. It is theirs in the strong sense — loaded by their ClassLoader —
+     * so an `Intent(ourContext, thatClass)` names a component our process cannot resolve until
+     * their dex is added to our loader. That is a later step; this accessor only makes the class
+     * reachable.
+     *
+     * Null means the method is gone. It is never null in a build we know of, but a caller that
+     * assumed otherwise would crash at the launch site rather than declining to launch.
+     */
+    fun gameClass(): Class<*>? = klass.invokeOrNull(instance, "gameClass") as? Class<*>
+
+    /**
+     * Whether this build of the game can play [message] at all.
+     *
+     * Their interface defaults to `true` and only a few games override it — typically to refuse a
+     * payload written by a newer protocol version than the installed code understands. Defaulting
+     * to `true` on a missing method therefore matches their own default rather than inventing a
+     * stricter one: being wrong in the permissive direction opens a game that may misbehave, being
+     * wrong in the strict direction refuses one that would have worked.
+     */
+    fun isSupported(message: Map<String, String>): Boolean = klass.invokeOrNull(
+        instance,
+        "isSupported",
+        arrayOf(Map::class.java),
+        arrayOf<Any?>(message),
+    ) as? Boolean ?: true
+
+    /**
+     * The one-line status their balloon shows, e.g. `Your Move.` or `I won!`.
+     *
+     * Called with [appContext] for the same reason [newGameData] is — their overrides reach the
+     * settings layer, and a raw `createPackageContext` Context has no application object.
+     *
+     * Worth knowing before calling: their default body does `message["sender"]!!` inside the
+     * `winner` branch, so a payload that carries `winner` **without** `sender` throws inside their
+     * code. That surfaces here as [ForeignCallException] rather than as a crash, which is the
+     * distinction [Reflect] exists to preserve.
+     */
+    fun subtitle(message: Map<String, String>): String? = klass.invokeOrNull(
+        instance,
+        "getSubtitle",
+        arrayOf(Context::class.java, Map::class.java),
+        arrayOf(appContext, message),
+    ) as? String
+
+    /**
      * Compose the payload for a brand-new game.
      *
      * Not a pure getter: their implementation calls `Cryption.getId()`, builds an avatar string,
-     * and reads the sender identity out of prefs. Measured on-device for `pool`, this returns 19
-     * keys including `game`, `version`, `player`, `sender` and an avatar blob.
+     * and reads the sender identity out of prefs. Their interface default builds 14 keys; games
+     * override it and add their own, which is why `pool` measured 19 on-device — `PoolGame` adds
+     * `mode` and `v2`–`v5`, and rewrites `game` to `pool3` in 8 Ball+ mode. That rewrite is exactly
+     * what makes [ForeignGameCatalog.byName]'s alias load-bearing.
      *
      * Null means their code declined or the method is gone — either way there is nothing to send,
      * and the caller must not fabricate a substitute.
@@ -171,7 +221,7 @@ class ForeignGame internal constructor(
  * a diagnostic screen can distinguish "OpenPigeon has no games" from "we failed to read its list".
  *
  * The count is whatever the installed build has, and is expected to differ from any list read out
- * of OpenPigeon's current source. Measured against v1.1.0 (versionCode 26071901): 25 games, where
+ * of OpenPigeon's current source. Measured against v1.1.0 (versionCode 26081901): 25 games, where
  * upstream source at the time listed 26. The missing one was Shuffleboard, added upstream after
  * that APK was built — confirmed by finding no `openpigeon/shuffle` classes in the installed dex.
  * Reading their registry rather than a list of our own is precisely what makes that a non-event.
@@ -266,5 +316,32 @@ class ForeignGameCatalog private constructor(
 
     val isEmpty: Boolean get() = games.isEmpty()
 
-    fun byName(name: String): ForeignGame? = games.firstOrNull { it.name == name }
+    /**
+     * Find the game a wire payload's `game` key names.
+     *
+     * Not a plain lookup, because **the wire name is not always a game's name**. Their
+     * `MadridExtension.findByName` carries an alias map, and it is reproduced here rather than
+     * approximated:
+     *
+     * ```
+     * "pool3" -> games.find { it.getName() == "pool" }
+     * "pool2" -> games.find { it.getName() == "pool2" }
+     * else    -> games.find { it.getName() == name }
+     * ```
+     *
+     * `pool3` is the load-bearing one and it is not hypothetical — their own send path produces it.
+     * `PoolGame.getNewGameData` writes `put("game", if (plusMode == "8 Ball+") "pool3" else "pool")`,
+     * so every 8 Ball+ balloon carries `game=pool3`, while no game reports `getName() == "pool3"`.
+     * A bare exact match returns null for those, and their `findByName(gname)!!` turns that null
+     * into a NullPointerException inside their code.
+     *
+     * `pool2` looks redundant against the `else` branch and is kept anyway: it is theirs, it costs
+     * nothing, and a future build that renames the underlying game would diverge from us silently
+     * if we had "simplified" it away.
+     */
+    fun byName(name: String): ForeignGame? = when (name) {
+        "pool3" -> games.firstOrNull { it.name == "pool" }
+        "pool2" -> games.firstOrNull { it.name == "pool2" }
+        else -> games.firstOrNull { it.name == name }
+    }
 }
