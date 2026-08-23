@@ -12,7 +12,14 @@
         <package android:name="com.openbubbles.messaging" />
     </queries>
 
+    <!-- android:name is load-bearing, not cosmetic. A hosted game's GameSessionIPC calls
+         applicationContext.bindService(...), and in our process that Context IS this class, so
+         overriding bindService there is what lets the session channel be answered locally. Drop
+         this attribute and the framework instantiates a plain Application, the override never
+         runs, the bind leaves for real OpenPigeon, and every hosted board opens blank with no
+         error — see SeagullApplication and host/SessionChannel. -->
     <application
+        android:name=".SeagullApplication"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"

@@ -73,12 +73,27 @@ import org.junit.Test
  *   `com.openbubbles.openpigeon.IGameSession`, and a [java.lang.reflect.Proxy] built in *their*
  *   loader (`$Proxy5`) is assignable to it.
  *
- * The field dump also surfaced a hazard that is **not** measured here and must be settled before
- * anything is injected. `GameSessionIPC` holds `connection` (final, their `ServiceConnection`) and
- * a `Function1` `onBind`, and its constructor is `(Context, Function1)` — so *their* callback is
- * what assigns `gameSession` when the bind lands. Injecting a proxy before that connection settles
- * would have it overwritten by the real binder, silently and racily. Replacement therefore has to
- * happen after their `onServiceConnected`, which is what `onBind` exists to signal.
+ * ## Why the seam this file measures is not the one production uses
+ *
+ * The field dump reads like an invitation to swap `gameSession` after their bind lands —
+ * `GameSessionIPC` holds `connection` (final) and an `onBind` `Function1`, and their callback is
+ * what assigns the field, so the obvious plan is "wait for `onBind`, then overwrite". That plan is
+ * **wrong**, and reading all six of their `GameSessionIPC` call sites is what settled it: Pool,
+ * Golf, Crazy8, WordHunt, Knockout and Godot each assign the handle and call
+ * `getCurrentMessage(sessionId)` in the **next statement**. The read is synchronous, so there is no
+ * window after `onServiceConnected` in which a field could be swapped before it is used. (WordHunt's
+ * `ipcReady@` label looks like a deferral and is not — it exists so early `return@ipcReady`s can
+ * leave the lambda.)
+ *
+ * What is left is the bind itself. All six sites pass `applicationContext` to the constructor, and
+ * in our process that is our own `Application` — so `SeagullApplication` overrides `bindService`,
+ * answers `.IGameSession` with `host.SessionChannel`, and the call never reaches the framework.
+ * The hardcoded package id above stops mattering, and their re-entrant `initGameSession`
+ * (`onCreate` *and* `onNewIntent`, fresh IPC each time) is handled for free.
+ *
+ * The measurements below still stand and are still worth keeping: they are what prove the bind
+ * must be intercepted at all, and the proxy-assignability result is what proves a proxy of ours is
+ * a legal `IGameSession` in their loader.
  *
  * ```
  * adb logcat -d -s SEAGULL:I
@@ -221,13 +236,19 @@ class GameSessionBindProbe {
     /**
      * Is `GameSessionIPC`'s binder handle reachable, and can a substitute be put in it?
      *
-     * If the test above confirms their service answers with nothing, the fix cannot be "make their
-     * code bind elsewhere" — the package id is a `const-string` in their dex and there is no hook
-     * around it. What is left is to let the bind happen and then **replace the handle**: their
-     * `GameSessionIPC` holds `private var gameSession: IGameSession?`, and every method on it does
-     * `gameSession!!.<method>`. Overwrite that field and every call lands on us instead.
+     * This was written as the escape hatch for the test above: their `GameSessionIPC` holds
+     * `private var gameSession: IGameSession?` and every method on it does `gameSession!!.<method>`,
+     * so overwriting that field would send every call to us. Production ended up intercepting the
+     * bind instead, for the reason in the file header — the read is synchronous at all six sites, so
+     * there is no moment between the assignment and the first use.
      *
-     * Two things have to be true for that, and neither is obvious:
+     * It is kept because its second half is load-bearing regardless of which seam is used: it is
+     * what proves a [java.lang.reflect.Proxy] of ours is a legal `IGameSession` **in their loader**,
+     * which `SessionChannel` depends on completely. The field half is now a canary — if
+     * `gameSession` ever turns final or changes type, that is a signal their IPC has been reworked
+     * and the interception assumptions deserve a re-read.
+     *
+     * Two things have to be true, and neither is obvious:
      *
      * - the field is still there, still that type, and not final;
      * - a [java.lang.reflect.Proxy] built over **their** `IGameSession` interface is assignable to
