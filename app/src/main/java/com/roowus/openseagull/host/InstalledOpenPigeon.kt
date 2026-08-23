@@ -166,6 +166,27 @@ class InstalledOpenPigeon private constructor(
         return if (id == 0) null else drawable(id)
     }
 
+    /**
+     * The absolute path to their installed `base.apk`.
+     *
+     * Needed because two things [packageContext] cannot do require the archive *by name*: appending
+     * their dex to our own ClassLoader, and addressing a library inside it as
+     * `<sourceDir>!/lib/<abi>/<soname>`. Both live in [ForeignCode]; nothing else should need this.
+     *
+     * Readable by our uid — measured, `head -c 4` on it returns the `PK` zip magic — so
+     * the path is useful rather than merely informative. Nothing is copied out of it: the linker
+     * mmaps entries in place, which is what makes hosting their code cost no disk.
+     *
+     * `null` means the package vanished between [find] and here, which a background uninstall can
+     * genuinely cause.
+     */
+    val sourceDir: String?
+        get() = try {
+            host.packageManager.getApplicationInfo(packageName, 0).sourceDir
+        } catch (_: PackageManager.NameNotFoundException) {
+            null
+        }
+
     /** Version of the installed OpenPigeon, for diagnostics and compatibility gates. */
     val versionName: String?
         get() = try {
