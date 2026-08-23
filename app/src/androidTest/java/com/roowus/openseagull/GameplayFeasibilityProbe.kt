@@ -78,6 +78,16 @@ class GameplayFeasibilityProbe {
          * findings — exactly the loss this file exists to prevent.
          */
         var truncated = false
+
+        /**
+         * How far the native-dependency preload loop will follow the chain before stopping.
+         *
+         * Their `libopenbubblesextension.so` needs one library (`libc++_shared.so`) and that one
+         * needs nothing further out of their APK, so 8 is slack rather than a real bound. It exists
+         * because the loop's exit condition comes from parsing a linker message, and a message that
+         * changed shape would otherwise spin forever instead of reporting a finding.
+         */
+        const val MaxDependencyChain = 8
     }
 
     private val tag = "SEAGULL"
@@ -593,5 +603,282 @@ class GameplayFeasibilityProbe {
             }
             record("engine class $it -> $found")
         }
+    }
+
+    /**
+     * Obstacle 4: can their native library be loaded by *our* process?
+     *
+     * Four of their seven native games sit behind one `.so`. `KnockoutActivity.kt:3015`,
+     * `PoolActivity.kt:4039`, `GolfNativePhysics.kt:36` and `ShuffleNativePhysics.kt:7` all call
+     * `System.loadLibrary("openbubblesextension")`, and that call searches the **caller's**
+     * `ClassLoader`'s native search path — not theirs. Obstacle 1b put their *dex* on our loader;
+     * their `.so` is a separate list on the same `DexPathList` and is not carried along with it.
+     *
+     * What makes this worth measuring rather than assuming is how the file is packaged:
+     * `unzip -l` on their `base.apk` shows `lib/arm64-v8a/libopenbubblesextension.so` at **624,608
+     * bytes, `Stored`, 0%** — uncompressed and page-aligned, which is the condition under which the
+     * linker can map a `.so` straight out of a ZIP. `run-as com.roowus.openseagull head -c 4` on
+     * that archive returns `504b 0304`, so our uid really can read it.
+     *
+     * So the bytes are reachable. Whether they are *loadable* turns on a path syntax: an
+     * un-extracted library is named to the linker as `<apk>!/lib/<abi>`, a single `DexPathList`
+     * entry, and nothing guarantees a foreign APK appended that way satisfies `System.loadLibrary`.
+     *
+     * ## Measured (emulator-5554, API 36, OpenPigeon 1.1.0), and the answer is yes — in two steps
+     *
+     * ```
+     * before injection: UnsatisfiedLinkError: dlopen failed:
+     *   library "libopenbubblesextension.so" not found
+     * append -> ok (2 + 3 elements, 3 dirs)
+     * after injection:  UnsatisfiedLinkError: dlopen failed:
+     *   library "libc++_shared.so" not found: needed by
+     *   …/base.apk!/lib/arm64-v8a/libopenbubblesextension.so in namespace clns-9
+     * preloading …/base.apk!/lib/arm64-v8a/libc++_shared.so -> loaded
+     * retry: loaded
+     * ```
+     *
+     * **The two failures are not the same failure**, and reading the second as a repeat of the
+     * first is the mistake this probe made on its first run. The first says the file was not found.
+     * The second names the file — it was found, mapped, and *linked against* — and blames a
+     * `DT_NEEDED` entry. The append had already worked by then.
+     *
+     * The reason the dependency still misses is that the append is Java-side only.
+     * `System.loadLibrary` asks the ClassLoader where the file is, and that now answers correctly;
+     * but once `dlopen` has the file, its dependencies are resolved by **the linker namespace**
+     * (`clns-9`), whose search path was fixed when our ClassLoader was created and which reflection
+     * over `DexPathList` never touches. Their `libc++_shared.so` is in the same directory of the
+     * same APK and is simply not on that list.
+     *
+     * What rescues it is that a library already loaded into the namespace is matched by soname. So
+     * naming the dependency by explicit full in-APK path — `System.load("<apk>!/lib/<abi>/<so>")` —
+     * puts it in the namespace under its soname, and the retry resolves. Hosting a native game
+     * therefore costs **an ordered preload, not a file copy**: nothing of theirs is extracted, and
+     * nothing of theirs is shipped.
+     *
+     * As in obstacle 1b, the baseline runs **first**. `libopenbubblesextension` is not a name we
+     * ship, but "it loaded" is exactly the conclusion that would be wrong-and-comfortable if some
+     * transitive dependency had already put it on the path, so the pre-injection attempt is what
+     * makes the post-injection result mean anything.
+     *
+     * One thing the run corrected outright: `info.nativeLibraryDir` **exists on disk** on this
+     * device (an earlier note here claimed otherwise from a `dumpsys`-reported
+     * `legacyNativeLibraryDir`). It is empty — `ls` gives `total 0` — so the conclusion that
+     * nothing was extracted still holds, but via the directory's contents rather than its absence.
+     *
+     * Nothing here asserts. A blocked result is a finding, not a failure.
+     */
+    @Test
+    fun theirNativeLibraryCanBeLoadedFromOurProcess() {
+        beginSection("obstacle 4: can we load their .so out of their APK?")
+        val pigeon = pigeonOrSkip() ?: return
+        val info = try {
+            context().packageManager.getApplicationInfo(pigeon.packageName, 0)
+        } catch (e: PackageManager.NameNotFoundException) {
+            record("SKIP: no ApplicationInfo (${e.javaClass.simpleName})")
+            return
+        }
+
+        // Their build leaves this pointing at a directory that does not exist on disk. Recording it
+        // alongside the ABI is what makes the "not extracted" claim above checkable per device
+        // rather than a remembered fact.
+        record("their nativeLibraryDir = ${info.nativeLibraryDir}")
+        record("  exists on disk = ${java.io.File(info.nativeLibraryDir).isDirectory}")
+        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+        record("our primary abi = $abi")
+
+        val library = "openbubblesextension"
+
+        // Baseline, before touching the search path. See obstacle 1b: a library that already
+        // resolves would make every line below vacuous.
+        val before = loadOutcome(library)
+        record("before injection: System.loadLibrary(\"$library\") -> $before")
+        if (before == "loaded") {
+            record("NOTE: already loadable — injection result below proves nothing")
+            return
+        }
+
+        val entry = "${info.sourceDir}!/lib/$abi"
+        record("appending native path entry: $entry")
+        val added = try {
+            appendNativePathToLoader(context().classLoader, info.sourceDir, abi)
+        } catch (e: ReflectiveOperationException) {
+            "blocked: ${e.cause ?: e}"
+        } catch (e: RuntimeException) {
+            "blocked: $e"
+        }
+        record("append -> $added")
+
+        var after = loadOutcome(library)
+        record("after injection: System.loadLibrary(\"$library\") -> $after")
+
+        // Measured on the first run: the append *worked* — their `.so` was found and mapped — and
+        // the failure moved one level down, to `libc++_shared.so not found: needed by
+        // …/base.apk!/lib/arm64-v8a/libopenbubblesextension.so`. That is a different problem
+        // wearing the same exception type, and reading it as "the path did not take" would have
+        // sent the design off to extract a file that was never the obstacle.
+        //
+        // The reason is that our search-path append is Java-side only. `System.loadLibrary` asks
+        // the ClassLoader where the file is, and that part now answers correctly; but once dlopen
+        // has the file, its `DT_NEEDED` entries are resolved by **the linker namespace**, whose
+        // search path was fixed when our ClassLoader was created and which our reflection never
+        // touched. Their `libc++_shared.so` sits in the same directory of the same APK and is
+        // simply not on that list.
+        //
+        // A library already loaded into the namespace is matched by soname, though, so naming the
+        // dependency explicitly by full in-APK path is enough to satisfy the next attempt. The
+        // loop follows the chain rather than assuming its length: each failure names exactly one
+        // missing soname, so parse it, load that, and retry.
+        val preloaded = mutableListOf<String>()
+        var guard = 0
+        while (guard++ < MaxDependencyChain) {
+            val missing = missingSonameIn(after) ?: break
+            if (missing in preloaded) {
+                record("dependency $missing was preloaded and is still reported missing — giving up")
+                break
+            }
+            val path = "${info.sourceDir}!/lib/$abi/$missing"
+            val outcome = try {
+                System.load(path); "loaded"
+            } catch (e: UnsatisfiedLinkError) {
+                "UnsatisfiedLinkError: ${e.message?.take(200)}"
+            } catch (e: LinkageError) {
+                "${e.javaClass.simpleName}: ${e.message?.take(200)}"
+            }
+            record("preloading dependency $path -> $outcome")
+            if (outcome != "loaded") break
+            preloaded += missing
+            after = loadOutcome(library)
+            record("retry after preloading $missing: System.loadLibrary(\"$library\") -> $after")
+        }
+
+        record(
+            when {
+                after == "loaded" && preloaded.isEmpty() ->
+                    "VERDICT: their .so loads straight out of their APK — the four native games " +
+                        "need no file copying, and nothing of theirs has to be shipped"
+                after == "loaded" ->
+                    "VERDICT: their .so loads out of their APK once ${preloaded.joinToString()} " +
+                        "is loaded first by explicit path — no file copying, but hosting a native " +
+                        "game must preload that dependency chain in order"
+                missingSonameIn(after) != null ->
+                    "VERDICT: the file is found and mapped; what fails is a dependency " +
+                        "(${missingSonameIn(after)}) that preloading did not fix — the linker " +
+                        "namespace, not the search path, is the obstacle"
+                after.contains("not found", ignoreCase = true) ->
+                    "VERDICT: the in-APK path did not satisfy the loader — hosting a native game " +
+                        "means extracting $library into our own nativeLibraryDir first"
+                else ->
+                    "VERDICT: found but rejected ($after) — a mapping/linkage problem, not a " +
+                        "search-path one, and extraction would not fix it"
+            },
+        )
+    }
+
+    /**
+     * The soname a `dlopen` failure blames, or null if the failure is not a missing dependency.
+     *
+     * The distinction this draws is the one the first run of this probe got wrong. Both of these
+     * are an `UnsatisfiedLinkError` and they call for opposite fixes:
+     *
+     * ```
+     * library "libopenbubblesextension.so" not found                       <- the file is missing
+     * library "libc++_shared.so" not found: needed by …/libopenbubbles…so  <- a dependency is
+     * ```
+     *
+     * Only the second has a `needed by` clause, and only the second is worth preloading. Keying on
+     * that clause rather than on the quoted name is what keeps a genuine search-path miss from
+     * being mistaken for a dependency chain.
+     */
+    private fun missingSonameIn(outcome: String): String? {
+        if (!outcome.contains("needed by")) return null
+        return Regex("""library "([^"]+)" not found""").find(outcome)?.groupValues?.get(1)
+    }
+
+    /**
+     * Try to load [library], reporting the outcome instead of throwing.
+     *
+     * The three cases are kept apart deliberately: "not found" and "found but would not link" look
+     * identical if both are reduced to a boolean, and they call for opposite fixes.
+     */
+    private fun loadOutcome(library: String): String = try {
+        System.loadLibrary(library)
+        "loaded"
+    } catch (e: UnsatisfiedLinkError) {
+        // The message carries which of the two it is — a missing file names the paths searched, a
+        // failed dlopen names the symbol or relocation. Keeping it verbatim is the finding.
+        "UnsatisfiedLinkError: ${e.message?.take(300)}"
+    } catch (e: LinkageError) {
+        "${e.javaClass.simpleName}: ${e.message?.take(300)}"
+    } catch (e: SecurityException) {
+        "SecurityException: ${e.message?.take(300)}"
+    }
+
+    /**
+     * Add `<[apkPath]>!/lib/<[abi]>` to [loader]'s native search path.
+     *
+     * The companion to [appendApkToLoader], and deliberately not folded into it: the dex list and
+     * the native list are separate fields on the same `DexPathList`, injected at different times for
+     * different reasons, and a caller that wants classes does not necessarily want to perturb the
+     * linker's search order.
+     *
+     * Two representations have to be kept in step and that is the whole difficulty:
+     *
+     * - `nativeLibraryDirectories`, a `List<File>` — what `DexPathList` re-derives from;
+     * - `nativeLibraryPathElements`, an `Element[]` — what `findLibrary` actually walks.
+     *
+     * Writing only the first is the classic silent no-op: the field looks right under a debugger
+     * and `findLibrary` never consults it. So the `Element` is built by handing a throwaway
+     * [PathClassLoader] the same in-APK path and stealing the element it constructed — the same
+     * version-tolerance trick [appendApkToLoader] uses, and for the same reason: `makePathElements`
+     * has changed signature repeatedly across releases.
+     *
+     * Ours stay first. A hosted game asking for a library we also ship must keep getting ours.
+     *
+     * Returns a short description of what it did, so the caller can record it; throws only when
+     * reflection is blocked outright, which is itself the answer.
+     */
+    @Throws(ReflectiveOperationException::class)
+    private fun appendNativePathToLoader(
+        loader: ClassLoader,
+        apkPath: String,
+        abi: String,
+    ): String {
+        val pathListField = Class.forName("dalvik.system.BaseDexClassLoader")
+            .getDeclaredField("pathList").apply { isAccessible = true }
+        val pathList = pathListField.get(loader)
+        val listClass = pathList.javaClass
+
+        val dirsField = listClass
+            .getDeclaredField("nativeLibraryDirectories").apply { isAccessible = true }
+        val elementsField = listClass
+            .getDeclaredField("nativeLibraryPathElements").apply { isAccessible = true }
+
+        @Suppress("UNCHECKED_CAST")
+        val dirs = dirsField.get(pathList) as MutableList<java.io.File>
+        val existing = elementsField.get(pathList) as Array<*>
+
+        // An in-APK library is addressed by this exact syntax; the linker splits on '!' and mmaps
+        // the entry out of the archive. It is a path, not a directory, which is why File() is the
+        // right type despite nothing existing at that name on disk.
+        val inApk = java.io.File("$apkPath!/lib/$abi")
+        if (dirs.none { it.path == inApk.path }) dirs.add(inApk)
+
+        // Steal a ready-made Element rather than call makePathElements. The donor is given the
+        // in-APK path as its librarySearchPath, so the element it builds is exactly the one wanted.
+        val donor = PathClassLoader("", inApk.path, null)
+        val donorElements = elementsField.get(pathListField.get(donor)) as Array<*>
+        if (donorElements.isEmpty()) {
+            return "no native element was built for ${inApk.path} (dirs updated only)"
+        }
+
+        val merged = java.lang.reflect.Array.newInstance(
+            existing.javaClass.componentType,
+            existing.size + donorElements.size,
+        )
+        System.arraycopy(existing, 0, merged, 0, existing.size)
+        System.arraycopy(donorElements, 0, merged, existing.size, donorElements.size)
+        elementsField.set(pathList, merged)
+
+        return "ok (${existing.size} + ${donorElements.size} elements, ${dirs.size} dirs)"
     }
 }
