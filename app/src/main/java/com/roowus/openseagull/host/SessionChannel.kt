@@ -57,6 +57,16 @@ import java.lang.reflect.Proxy
 class SessionChannel private constructor(
     private val descriptor: String,
     private val iface: Class<*>,
+    /**
+     * Held only to hand to [SessionWriter], which needs their catalog to rebuild the balloon.
+     *
+     * Nothing else here touches it — [iface] and [descriptor] were already resolved from it by
+     * [of] before construction, and the proxy is built over `iface.classLoader` rather than over
+     * anything reachable from a package Context. Keeping the reference costs nothing: the same
+     * object is held for the process's lifetime by [SeagullApplication], which is the only caller
+     * of [of].
+     */
+    private val pigeon: InstalledOpenPigeon,
 ) {
 
     /**
@@ -154,7 +164,21 @@ class SessionChannel private constructor(
                     // continue" signal, not an acknowledgement, and their game hangs waiting for it
                     // if a dropped update skips it.
                     invokeQuietly(args[2], "onFinished")
-                    if (merged != null) notify(id, merged)
+                    if (merged != null) {
+                        notify(id, merged)
+                        // Off this thread, and after their callback: `updateMessage` is not
+                        // `oneway`, and this method is running on their game's own thread (see the
+                        // class KDoc on why no marshalling happens), so writing inline would stall
+                        // their UI for as long as the host takes to accept the message.
+                        //
+                        // `notify` carries the pre-enrichment board deliberately. The two keys
+                        // [SessionWriter] adds are balloon metadata — the caption the recipient
+                        // reads and the `player1` claim — and their own `updateSession` does not
+                        // notify anything at all; ours exists so a game that is still open sees
+                        // its own move land. Handing it a caption it did not ask for would be a
+                        // difference from their behaviour with nothing to gain.
+                        SessionWriter.write(pigeon, id)
+                    }
                     return null
                 }
 
@@ -320,7 +344,7 @@ class SessionChannel private constructor(
             // that produced this file's last bug.
             val descriptor = descriptorOf(loader) ?: IGameSession
             return try {
-                SessionChannel(descriptor, iface)
+                SessionChannel(descriptor, iface, pigeon)
             } catch (t: Throwable) {
                 Log.w(TAG, "could not build a session channel over $IGameSession", t)
                 null

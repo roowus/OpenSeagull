@@ -26,22 +26,27 @@ import java.util.concurrent.ConcurrentHashMap
  * therefore a flat `String → String` map and nothing else; storing anything richer here would be a
  * fiction that silently evaporates at the boundary.
  *
- * ## What is deliberately not done yet
+ * ## What this half is, and is not
  *
- * [update] merges into memory and notifies, but does **not** persist the result back to the
- * conversation. That is *write-back*, and it needed three things: the `IMessageViewHandle` the host
- * addressed this balloon with, their `Cryption.encrypt` to build the outbound payload, and a thread
- * that is not the main one — `updateMessage` is not `oneway` in the AIDL, so it blocks until the
- * host has taken the message.
+ * This is memory. [update] merges a move and returns it; it does not put anything into the
+ * conversation. That is *write-back*, and it lives in [SessionWriter], which [SessionChannel] calls
+ * immediately after [update] on a thread of its own — `updateMessage` is not `oneway` in the AIDL,
+ * so it blocks until the host has taken the message, and the call arrives on their game's thread.
  *
- * The first of those is now here ([Session.handle], set through [attachHandle]). The other two are
- * not, so nothing calls `updateMessage` and [update] still ends in memory.
+ * Two of the three things write-back needed were once missing from here and are not any more: the
+ * `IMessageViewHandle` the host addressed this balloon with ([Session.handle], set through
+ * [attachHandle]), and the identity that stamps `player1` ([Session.senderUuid]). The third — the
+ * outbound ciphertext — turned out to need nothing new, because their `buildGameMessage` calls
+ * `Cryption.encrypt` itself.
  *
- * Reading the other direction is built: [open] is called from `MadridExtension.didTapTemplate` when
- * a balloon is tapped and again from `messageUpdated` when the other player moves, so a hosted game
- * reads a real board. It is only the move *out* that stops here. A move made in a hosted game is
- * therefore visible to that game and lost on exit, and the log line in [update] says so rather than
- * letting it pass for working.
+ * Reading the other direction is built too: [open] is called from `MadridExtension.didTapTemplate`
+ * when a balloon is tapped and again from `messageUpdated` when the other player moves, so a hosted
+ * game reads a real board.
+ *
+ * ## What is still deliberately not done
+ *
+ * [lock] and [unlock] count depth and stop there. Theirs call through to `handle.lock()` /
+ * `handle.unlock()` under a monitor, so a hosted game currently locks nothing in the host.
  */
 object SessionRegistry {
 
@@ -109,8 +114,8 @@ object SessionRegistry {
          * has an `updateHandle` for exactly that, and dropping the new one would leave write-back
          * addressed to a balloon the host has already forgotten.
          *
-         * Held rather than used: nothing calls `updateMessage` yet. This is the piece that was
-         * missing, not the write-back itself.
+         * [SessionWriter] is what calls `updateMessage` on it, and what says so in the log when it
+         * is still null at the moment a move needs sending.
          */
         @Volatile
         internal var handle: IMessageViewHandle? = null
@@ -208,14 +213,11 @@ object SessionRegistry {
         }
         val merged = LinkedHashMap(session.message).apply { putAll(delta) }
         session.message = merged
-        // The move is real to the running game and invisible to the conversation until the balloon
-        // half is wired. Said out loud because a lost move with no log line is indistinguishable
-        // from a game that never made one.
-        Log.i(
-            TAG,
-            "session updated id=${id.take(8)}… +${delta.size} keys (not yet written back to the " +
-                "balloon — updateMessage is unwired)",
-        )
+        // Says nothing about the conversation: this is memory, and [SessionWriter] logs the
+        // balloon half separately. Two lines rather than one because they can disagree — a move
+        // can land here and still be lost on the way out, and that is exactly the case worth
+        // being able to see.
+        Log.i(TAG, "session updated id=${id.take(8)}… +${delta.size} keys → ${merged.size} total")
         return merged
     }
 
