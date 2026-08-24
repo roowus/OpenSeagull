@@ -18,8 +18,22 @@
          this attribute and the framework instantiates a plain Application, the override never
          runs, the bind leaves for real OpenPigeon, and every hosted board opens blank with no
          error — see SeagullApplication and host/SessionChannel. -->
+    <!-- android:appComponentFactory is how their native games get to load at all. Their
+         KnockoutActivity runs System.loadLibrary in its <clinit>, which the framework executes
+         inside Class.newInstance — earlier than onCreate, earlier than anything overridable on the
+         Activity. This hook is the last point before that, and it is per-component, so a process
+         that never opens a game never pays for the preparation. See host/HostedComponentFactory.
+
+         tools:replace is required, not tidiness: androidx.core's own manifest sets this attribute
+         to CoreComponentFactory and the merge fails as a conflict without it. HostedComponentFactory
+         extends that class, so androidx keeps the behaviour it declared the attribute for.
+
+         The attribute is API 28+; below that the framework ignores it and SeagullApplication.onCreate
+         does the same work, later and for every process. -->
     <application
         android:name=".SeagullApplication"
+        android:appComponentFactory="com.roowus.openseagull.host.HostedComponentFactory"
+        tools:replace="android:appComponentFactory"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -37,6 +51,71 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Hosted OpenPigeon games.
+             Measured by HostedActivityProbe: after ForeignCode.installDex their Activity class is
+             resolvable by our loader, and starting it still fails —
+
+                 PackageManager.resolveActivity -> null
+                 ActivityNotFoundException: Unable to find explicit activity class
+                     {com.roowus.openseagull/com.openbubbles.openpigeon.knockout.KnockoutActivity}
+
+             Two separate gates, and only the first is dex work. The framework resolves a component
+             through PackageManager against the *installed manifest* before our process loads
+             anything, so a class our loader can find but our manifest never declared does not
+             exist as far as a launch is concerned.
+
+             android:name is only a string: it is resolved at launch, through the ClassLoader of
+             the process, which is ours *after* installDex has run. So naming a class this APK does
+             not contain is legal, and it is what makes hosting possible without shipping their
+             code. It also means every launch site MUST call ForeignCode.installDex first — with no
+             injection these entries name nothing and the failure is the same one quoted above.
+
+             Two deliberate divergences from their manifest, both forced:
+
+             - No android:theme. Theirs say Theme.OpenBubblesSampleExtension, which lives in their
+               resource table; an id from their dex means nothing against ours, and pointing at our
+               own theme of the same name would be a different theme wearing the right label. These
+               inherit the application theme until their table is merged in, so a hosted board may
+               be styled wrongly before it is styled correctly. That is a visible bug, not a silent
+               one, which is the right way round.
+             - exported="false" is kept from theirs and is not a formality: these must be startable
+               by us and by nobody else, exactly as upstream has it.
+
+             GodotGameActivity keeps :godot and its configChanges verbatim — the engine relies on
+             both, and a separate process is also where its 71 MB of native library lands. -->
+        <activity
+            android:name="com.openbubbles.openpigeon.knockout.KnockoutActivity"
+            android:exported="false" />
+        <activity
+            android:name="com.openbubbles.openpigeon.pool.PoolActivity"
+            android:exported="false" />
+        <activity
+            android:name="com.openbubbles.openpigeon.golf.GolfActivity"
+            android:exported="false" />
+        <activity
+            android:name="com.openbubbles.openpigeon.shuffle.ShuffleActivity"
+            android:exported="false" />
+        <activity
+            android:name="com.openbubbles.openpigeon.wordhunt.WordHuntActivity"
+            android:exported="false" />
+        <activity
+            android:name="com.openbubbles.openpigeon.crazy8.Crazy8Activity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name="com.openbubbles.openpigeon.questions.SecretWordActivity"
+            android:exported="false"
+            android:taskAffinity="${applicationId}.utility"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
+        <activity
+            android:name="com.openbubbles.openpigeon.godot.GodotGameActivity"
+            android:exported="false"
+            android:process=":godot"
+            android:launchMode="singleTop"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density" />
 
         <!-- The component OpenBubbles binds to.
              Register it in OpenBubbles → Settings → Troubleshoot → Developer Tools as exactly:
