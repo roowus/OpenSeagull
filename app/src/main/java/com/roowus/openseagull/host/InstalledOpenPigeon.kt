@@ -54,6 +54,12 @@ import android.graphics.drawable.Drawable
  * Context, and passing one by reflex silently forks the player's identity between the two apps.
  * See [packageContext] for which to pass and why.
  *
+ * Passing theirs is necessary and, for this one method, still not sufficient: their prefs file is
+ * not readable across uids either, so their code sees an empty map and mints a throwaway that is
+ * never written — a fresh identity every process. Measured in `ForeignIdentityProbe`; the
+ * consequences are on [ForeignGameCatalog.senderUuid]. Reading *code* out of their APK works;
+ * reading their *private data* does not, and the two failures look alike from the call site.
+ *
  * ## What this class does not do
  *
  * Nothing here copies, extracts, or redistributes any part of OpenPigeon. The code stays in the

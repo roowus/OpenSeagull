@@ -51,17 +51,35 @@ class ForeignGame internal constructor(
     }
 
     /**
-     * The player identity OpenPigeon would use, read with the Context deliberately chosen.
+     * The player identity OpenPigeon would use — **which we cannot actually reach.** Diagnostic
+     * only; do not use this as a sender id.
      *
      * Their `getSenderUUID(context)` mints and caches a UUID in
      * `getSharedPreferences("openpigeon")` **of whatever Context it is handed**. Passing ours
      * would create a second identity in our own prefs — measured on-device: our Context yielded
-     * `efa4fbfd-…`, theirs `e754dc69-…`, for the same game object.
+     * `efa4fbfd-…`, theirs `e754dc69-…`, for the same game object. So this passes *their*
+     * [InstalledOpenPigeon.packageContext], which is the right Context and still not enough.
      *
-     * We pass *their* [InstalledOpenPigeon.packageContext] so the identity is the one the user
-     * already plays under. Their data directory is not writable by us, so this reads an existing
-     * identity rather than minting one; a user who has never launched OpenPigeon may have none
-     * yet, which is why the result is nullable.
+     * ## Why the obvious reading of that is wrong
+     *
+     * This KDoc used to claim their directory "is not writable by us, so this reads an existing
+     * identity rather than minting one". The first half is true and the second does not follow.
+     * Their prefs are not *readable* either — `shared_prefs/openpigeon.xml` reports
+     * `exists=false readable=false` from our uid — so `getSharedPreferences` hands their code an
+     * empty map, its `?: UUID.randomUUID().toString()` branch fires, and the write lands nowhere.
+     * A well-formed UUID comes back either way, which is why the difference never announced itself.
+     *
+     * `ForeignIdentityProbe` measured it: three runs, three identities — `6dd61f28…`, `64f0fae6…`,
+     * `6e7f7792…`. Two calls *within* one process do agree, because their game object caches the
+     * minted value, and that agreement is precisely the trap.
+     *
+     * A sender id that changes every process is worse than none for their
+     * `isYourTurn = message["sender"] != myId`, which needs an id that outlives the turn. Our own
+     * identity, persisted in our own data directory, is the answer — see [SessionRegistry]. It is
+     * not the id the user plays under in OpenPigeon proper, which is correct for a separate
+     * install rather than a compromise.
+     *
+     * Null means the method is gone or refused.
      */
     fun senderUuid(): String? = klass.invokeOrNull(
         instance,
