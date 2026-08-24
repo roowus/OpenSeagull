@@ -2,6 +2,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Their games' runtime needs, declared by us because they run in OUR process and their own
+         manifest grants them nothing here. The list is theirs minus what only their app shell
+         used. Measured before added: pool crashed on device with
+         `SecurityException: vibrate: Neither user … has android.permission.VIBRATE` the first
+         time a shot connected — the permission is what their haptic feedback calls, so without
+         it every native game that shakes on impact takes the process down. VIBRATE is a
+         normal permission: granted at install, no runtime prompt.
+
+         Deliberately NOT taken from their list: INTERNET (their app talks to their servers —
+         Mixpanel telemetry and game downloads — none of which our process should do or appear
+         to do) and POST_NOTIFICATIONS (we post nothing; their games notify nothing either). -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <!-- Package-visibility filtering (targetSdk 30+) hides other apps by default: without these
          entries every PackageManager call against them throws NameNotFoundException even when the
          app is installed. OpenSeagull needs to see OpenPigeon to read its code and assets, and to

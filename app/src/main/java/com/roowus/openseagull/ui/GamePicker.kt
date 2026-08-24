@@ -33,20 +33,32 @@ import com.roowus.openseagull.host.ForeignGameCatalog
  * page of theirs, so the panel does not jump when the user switches which extension holds the
  * GamePigeon slot.
  */
+import kotlin.comparisons.nullsLast
+
 internal class GamePicker(
     private val context: Context,
     private val catalog: ForeignGameCatalog,
 ) {
 
     /**
-     * Games actually offered, in catalog order.
+     * Games actually offered, alphabetical by display name.
+     *
+     * The catalog itself arrives in registry order, which is declaration order in their source —
+     * meaningful to their maintainers, arbitrary to a user paging through a grid. Sorting here
+     * rather than in the catalog because the catalog's order is also its *diagnostic* output
+     * (DiagnosticsActivity prints it as evidence of what their registry said), and that should
+     * stay raw.
+     *
+     * Name first, nulls last: a game with no display name still appears, at the end, rather than
+     * sorting before "8 Ball" on a null comparison.
      *
      * OpenPigeon hides three of its own games from its picker (`hunt`, `anagrams`, `wordbites`).
      * That is their editorial decision about their own product, not a technical constraint, so
      * OpenSeagull does not inherit it — a game their registry reports is a game we show. If one of
      * them turns out to be broken when launched, that is a gameplay problem to fix there.
      */
-    val games: List<ForeignGame> get() = catalog.games
+    val games: List<ForeignGame> =
+        catalog.games.sortedWith(compareBy(nullsLast()) { it.displayName ?: it.name ?: "" })
 
     /**
      * Paging state and the layout arithmetic behind it, kept outside the view so a tap can advance
