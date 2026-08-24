@@ -671,6 +671,21 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
      * `shutdown()` rather than `shutdownNow()`: a compose already in flight has either sent its
      * balloon or is about to, and interrupting it mid-`buildGameMessage` would abandon a tap the
      * user made. There is at most one, and it finishes in well under a second.
+     *
+     * **[SessionRegistry] is deliberately not cleared here.** The obvious symmetry — the service
+     * owned the sessions, so drop them when it dies — is wrong for this architecture. Their game
+     * activities are `exported="false"`, so a hosted game runs in *our* process, not the host's;
+     * meanwhile Android destroys a bound service the moment its last client unbinds, and
+     * OpenBubbles has no reason to hold the binding open while the user is in a full-screen game.
+     * Clearing here would empty the board out from under a game that is still being played, and it
+     * would do so precisely in the common case.
+     *
+     * What that leaves behind is sessions holding an `IMessageViewHandle` for a host that may be
+     * gone, and that is already handled where it lands rather than pre-emptively here:
+     * [SessionRegistry]'s `callQuietly` and [com.roowus.openseagull.host.SessionWriter] log a dead
+     * binder instead of throwing, and [SessionRegistry.attachHandle] takes the fresh handle the
+     * host issues on a rebind. A session outliving its service is a few hundred bytes; a game
+     * whose board vanished mid-move is a lost turn.
      */
     fun release() {
         composer.shutdown()
