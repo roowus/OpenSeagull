@@ -509,9 +509,10 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
             // from the balloon rather than from a stale board.
             //
             // One case is known and reaches here by design rather than by omission: their
-            // `WordGames` is in the shipped catalog, overrides `gameClass()` to return their
-            // `GameNotFound` dialog, and does not override `isSupported`, so the check above lets
-            // it through. Their `GameNotFound` is not something we can host — see
+            // `WordGames` is in the shipped catalog and does not override `isSupported`, so the
+            // check above lets it through — but it is a chooser rather than a game, and its
+            // `gameClass()` returns their `GameNotFound` precisely because opening it directly is
+            // not meant to happen. Their `GameNotFound` is not something we can host — see
             // [UnsupportedGameActivity] for why — so the user gets ours instead.
             Log.w(TAG, "no <activity> declared for ${target.name} — dropping the session", e)
             SessionRegistry.close(sessionId)

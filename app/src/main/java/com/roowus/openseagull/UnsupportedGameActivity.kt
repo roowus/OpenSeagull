@@ -62,10 +62,18 @@ class UnsupportedGameActivity : AppCompatActivity() {
             "Your installed OpenPigeon has $name, but doesn't recognise this version of it. " +
                 "The game was probably sent from a newer build than the one on this phone."
 
-        /** OpenPigeon can play it; OpenSeagull has no `<activity>` declared to host it in. */
+        /**
+         * No `<activity>` of ours can host what the game asked to open.
+         *
+         * Deliberately does not promise that OpenPigeon itself plays it. The one case known to
+         * reach here is their `WordGames`, which is a chooser rather than a game — its
+         * `getNewGameData` returns null and its `gameClass` returns their `GameNotFound`, because
+         * opening it directly is not a thing that happens. Wording this as "OpenPigeon can, we
+         * can't" would be wrong there, and wrong in the confident direction.
+         */
         fun notHosted(name: String): String =
-            "OpenSeagull doesn't host $name yet. OpenPigeon plays it, but OpenSeagull has to declare " +
-                "each game up front, and this one isn't declared."
+            "OpenSeagull can't open $name. Each game has to be declared up front, and there's no " +
+                "screen registered for this one."
 
         private const val REASON_UNKNOWN = "OpenSeagull couldn't open this one."
     }
