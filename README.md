@@ -20,9 +20,14 @@ OpenSeagull ships **no OpenPigeon code, artwork, or game data**. It reads what i
 copy of OpenPigeon already installed on your device. Both apps stay installed, side by side, and
 OpenPigeon is never modified.
 
-> **Status: early.** The runtime-hosting architecture is proven on-device — foreign classes load,
-> their games enumerate, their resources and player identity resolve correctly. Gameplay is not
-> wired up yet. Today the app is a diagnostics screen and a registerable extension.
+> **Status: early.** The architecture is proven on-device: foreign classes load, games enumerate
+> from OpenPigeon's own registry, resources and player identity resolve, the picker grid renders,
+> a sent game round-trips through their encryption and decodes back to its board, and tapping a
+> balloon we cannot open shows a plain-language reason instead of doing nothing. What has not yet
+> run is everything that needs a live OpenBubbles conversation — rendering a received game as a
+> balloon, sending your move back into the chat, and locking the thread while you play. Those are
+> written and unit-tested but have never executed against a real host. Today the app is a
+> diagnostics screen plus an extension with a working game picker.
 
 [OpenPigeon]: https://github.com/OpenBubbles/OpenPigeon
 [GamePigeon]: https://apps.apple.com/us/app/gamepigeon/id1124197642
@@ -128,6 +133,12 @@ passes their package Context, and an instrumented test asserts the two UUIDs dif
 Game discovery prefers reading OpenPigeon's own registry, so new games appear without an OpenSeagull
 update, and falls back to known class names. Which path ran is reported as `strategy` — so "no
 games" is always distinguishable from "we failed to read the list".
+
+**When a tapped balloon can't be opened**, you get a dialog saying why instead of silence — either
+"your installed OpenPigeon doesn't recognise this version" (sent from a newer build) or "OpenSeagull
+doesn't host this game yet". OpenSeagull deliberately does not reuse OpenPigeon's own not-found
+dialog for this: that one fires analytics with a hardcoded token, and nothing of OpenPigeon's
+should run in OpenSeagull's process except what your own install already does.
 
 ## Tests
 
