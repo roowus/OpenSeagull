@@ -19,6 +19,7 @@ import com.roowus.openseagull.host.ForeignGame
 import com.roowus.openseagull.host.ForeignGameCatalog
 import com.roowus.openseagull.host.ForeignPayload
 import com.roowus.openseagull.host.InstalledOpenPigeon
+import com.roowus.openseagull.host.SeagullIdentity
 import com.roowus.openseagull.host.SessionRegistry
 import com.roowus.openseagull.ui.GamePicker
 import com.roowus.openseagull.ui.Posters
@@ -217,7 +218,7 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
                 Log.w(TAG, "'$name' produced no new-game data — nothing to send")
                 return
             }
-            game.buildMessage(data, session = null) ?: run {
+            game.buildMessage(stampIdentity(data, name), session = null) ?: run {
                 Log.w(TAG, "'$name' built no message — nothing to send")
                 return
             }
@@ -239,6 +240,57 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
             // rejected the message — there is no error channel that could tell us the latter.
             Log.w(TAG, "host went away during addMessage for '$name'", e)
         }
+    }
+
+    /**
+     * Replace the two identity keys their `getNewGameData` stamped with one that survives.
+     *
+     * Their default body reads `val sender = getSenderUUID(context)` once and writes it to both
+     * `sender` and `player2`. `getSenderUUID` reads their `openpigeon` prefs, which from our uid
+     * report `exists=false readable=false`, so its `?: UUID.randomUUID().toString()` fallback runs
+     * — and it runs *again* in the next process. Measured: four runs, four ids. A game sent with
+     * those keys is stamped with an identity that will not exist by the time the reply arrives, so
+     * their `isYourTurn = message["sender"] != myId` compares a live id against a dead one and the
+     * game we started would read as never being our turn.
+     *
+     * [SeagullIdentity] is the fix on the read side already
+     * ([com.roowus.openseagull.host.BoardVerdict]) and on the write-back side
+     * ([com.roowus.openseagull.host.SessionWriter]'s `player1` claim). This is the send-side half
+     * of the same rule: the id we put on the wire when a game is created must be the id we will
+     * still answer to.
+     *
+     * Both keys, not just `sender`: theirs sets them from the same variable, and `player2` is what
+     * their `updateSession` compares against to decide whether the *other* player may claim
+     * `player1`. Leaving `player2` as a throwaway would let both sides claim the same slot.
+     *
+     * A copy rather than a mutation: [ForeignGame.newGameData] returns their map as `Map<*, *>`,
+     * whose runtime type is theirs to choose — their `getNewGameData` happens to return a
+     * `mutableMapOf`, but games override it and nothing in the contract promises mutability. The
+     * keys are filtered to `String → String` on the way through because that is all their
+     * `encodeQuery` can carry anyway; a non-String value would be dropped at the boundary with no
+     * comment, exactly as [com.roowus.openseagull.host.SessionRegistry] documents.
+     *
+     * Returns [data] untouched when [SeagullIdentity] has no id, which on Android does not happen
+     * — `attach` runs from [SeagullApplication]. Substituting an empty string would be worse than
+     * their throwaway: at least a random UUID is unique to one game.
+     */
+    private fun stampIdentity(data: Map<*, *>, name: String): Map<*, *> {
+        val myId = SeagullIdentity.senderUuid()
+        if (myId.isEmpty()) {
+            Log.w(TAG, "no identity to stamp on '$name' — sending their per-process UUID")
+            return data
+        }
+        val stamped = LinkedHashMap<String, String>(data.size + 2)
+        for ((key, value) in data) {
+            if (key is String && value is String) stamped[key] = value
+        }
+        val theirs = stamped["sender"]
+        stamped["sender"] = myId
+        stamped["player2"] = myId
+        if (theirs != null && theirs != myId) {
+            Log.i(TAG, "stamped '$name' as ${myId.take(8)}… (theirs was ${theirs.take(8)}…)")
+        }
+        return stamped
     }
 
     /**
