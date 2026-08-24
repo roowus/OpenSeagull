@@ -1,14 +1,18 @@
 package com.roowus.openseagull.host
 
+import android.content.res.AssetManager
 import android.os.Build
 import android.util.Log
 import dalvik.system.PathClassLoader
 import java.io.File
+import java.lang.ref.Reference
+import java.util.Collections
+import java.util.WeakHashMap
 import java.util.zip.ZipFile
 
 /**
- * Makes the installed OpenPigeon's **classes and native libraries** reachable from our own
- * ClassLoader, without copying a byte of either to disk.
+ * Makes the installed OpenPigeon's **classes, native libraries and resources** reachable from our
+ * own process, without copying a byte of any of them to disk.
  *
  * [InstalledOpenPigeon] gets us a [android.content.Context] whose *own* loader can see their code.
  * That is enough to call a game object reflectively, and everything up to the picker does exactly
@@ -16,19 +20,26 @@ import java.util.zip.ZipFile
  * `getClassLoader()` of the process it runs in — ours — so their Activity class has to be
  * resolvable by our loader, not merely by theirs. That is what this class arranges.
  *
- * ## Two separate injections, on purpose
+ * ## Three separate injections, on purpose
  *
- * `DexPathList` keeps code and native libraries in different fields, and they are needed at
- * different moments for different reasons:
+ * They are needed at different moments, for different reasons, and by different callers:
  *
  * - [installDex] appends their APK to `dexElements`, so `loadClass` finds their Activity.
  * - [installNativePath] appends `<their apk>!/lib/<abi>` to the native search path, so
  *   `System.loadLibrary` finds their `.so`.
+ * - [installResources] appends their APK to an `AssetManager`, so an id baked into their dex
+ *   resolves to the entry it was compiled against.
  *
- * They are not folded together because a caller that wants a class does not necessarily want to
- * perturb the linker's search order, and because the native half is only relevant to the four
- * native games (Pool, Golf, Knockout, Shuffle) — the Godot ones need it too, but for a different
- * library.
+ * The first two are not folded together because a caller that wants a class does not necessarily
+ * want to perturb the linker's search order, and because the native half is only relevant to the
+ * four native games (Pool, Golf, Knockout, Shuffle) — the Godot ones need it too, but for a
+ * different library.
+ *
+ * The third stands apart for a stronger reason: it is the only one that is **not process-wide**.
+ * `dexElements` and the native search path belong to a ClassLoader, of which our process has one.
+ * An `AssetManager` belongs to a `Resources`, of which the framework builds many — measured, seven
+ * live at once — and an Activity's is **not** the Application's. So [installResources] is
+ * idempotent per object rather than once per process, and takes the object as an argument.
  *
  * ## Ours always comes first
  *
@@ -84,6 +95,19 @@ object ForeignCode {
      * would otherwise spin forever instead of reporting a failure.
      */
     private const val MaxDependencyChain = 8
+
+    /**
+     * An id from *their* table, used to prove a merge actually took.
+     *
+     * The exact layout id their `KnockoutActivity.onCreate` passes to `setContentView`, taken from
+     * the `Resources$NotFoundException` that closing gate 3 revealed. A real id from a real failure
+     * is worth more than a synthetic one: if this resolves, the launch that produced that stack
+     * trace gets further.
+     *
+     * A canary, not a dependency. Nothing here needs that layout and no code of ours draws it, so
+     * a build of theirs that renumbers it must not stop a game from being hosted — see [verify].
+     */
+    const val KnownTheirLayout = 0x7f0c001d
 
     /** What an injection attempt did. Never thrown — a blocked host has to degrade, not crash. */
     sealed interface Result {
@@ -236,6 +260,243 @@ object ForeignCode {
             }
         }
     }
+
+    /**
+     * `AssetManager`s their APK has already been appended to.
+     *
+     * Weak and identity-keyed, both deliberately. Weak because these outlive nothing — a
+     * `ResourcesImpl` is evicted when its `ResourcesKey` goes out of use, and a strong reference
+     * here would pin every table an app ever built. Identity because `AssetManager` inherits
+     * `equals` from `Object` anyway, but relying on that silently would be the kind of assumption
+     * this codebase keeps getting bitten by; [Collections.newSetFromMap] over a [WeakHashMap] says
+     * it out loud.
+     *
+     * Not guarded by [lock]: resource installation is per-object, so it does not contend with the
+     * process-wide injections, and synchronizing on the shared lock from a launch path would put
+     * an Activity construction behind an unrelated `dlopen`. The set has its own synchronization.
+     */
+    private val patchedAssets: MutableSet<AssetManager> =
+        Collections.synchronizedSet(Collections.newSetFromMap(WeakHashMap()))
+
+    /**
+     * Make an id baked into *their* dex resolve against *their* resource table.
+     *
+     * This is the last gate between a hosted Activity and a drawn board. Their `onCreate` calls
+     * `setContentView(0x7f0c001d)` — an integer, compiled in, with no name left in it — and against
+     * our table that id is nothing:
+     *
+     * ```
+     * android.content.res.Resources$NotFoundException: Resource ID #0x7f0c001d
+     *     at android.content.res.Resources.getLayout(Resources.java:1289)
+     *     at com.openbubbles.openpigeon.knockout.KnockoutActivity.onCreate(KnockoutActivity.kt:196)
+     * ```
+     *
+     * Because the id is an integer rather than a name, `getIdentifier` is beside the point: the
+     * merged table has to map *their* integer back to *their* entry, which is what appending their
+     * APK to the `AssetManager` does.
+     *
+     * ## Why appending is safe rather than reckless
+     *
+     * `0x7f` is the default app package id, and it is theirs. Ours is `0x80`, a reserved id this
+     * APK opts into (`--package-id 0x80 --allow-reserved-package-id`) for exactly this reason.
+     * Measured across both merge orders: **0 of 379 ids shadowed**, against 58 when we built at
+     * `0x7f`. So appending their table can only add names that previously resolved to nothing. It
+     * cannot change the meaning of an id of ours — which is what makes an in-place patch of a live,
+     * already-in-use table something other than a gamble.
+     *
+     * ## Why this patches an existing table instead of building a better one
+     *
+     * The framework builds an Activity's `Resources` in `ActivityThread.createBaseContextForActivity`,
+     * which runs **before** `mInstrumentation.newActivity(...)` — so by the time
+     * [HostedComponentFactory] is asked to instantiate their class, the table that will fail
+     * already exists and was built without us. An earlier reading of that ordering concluded the
+     * hook was too late. It is not: it rules out *preventing* the problem, not *repairing* it. The
+     * factory still runs before `attach`, therefore before `onCreate`, therefore before the
+     * `setContentView` that throws.
+     *
+     * Two routes to influencing the table at construction time were measured and are not used.
+     * `ApplicationInfo.sharedLibraryFiles` — the public-API shortcut — reported `not loaded`: the
+     * appended entry was silently ignored, with no exception. And patching the Application's table
+     * would never be seen, because an Activity's `AssetManager` is a different object (measured:
+     * `@f492f0e` vs `@1537d2f`). See `ForeignResourcesReport`, which took all three readings in a
+     * real launched Activity rather than under instrumentation — `am instrument
+     * --no-hidden-api-checks` lifts precisely the greylist restriction being tested, so a probe's
+     * pass proves nothing about production.
+     *
+     * ## Verified through `Resources`, not through the `AssetManager`
+     *
+     * [assets] is what gets mutated, but the read-back goes through [verifyWith] because
+     * `ResourcesImpl` sits in between with its own caches. A patch the `AssetManager` accepted but
+     * the owning `Resources` could not see would be a false pass, and the failure it caused would
+     * surface far away from here.
+     *
+     * @param assets the table to merge into — an Activity's own, not the Application's.
+     * @param verifyWith the `Resources` that owns [assets], read back through to confirm the merge
+     *   actually took. Optional only because a caller reaching [assets] by reflection may not have
+     *   the owner in hand; when it is omitted the result says the merge was not verified.
+     */
+    fun installResources(
+        pigeon: InstalledOpenPigeon,
+        assets: AssetManager,
+        verifyWith: android.content.res.Resources? = null,
+    ): Result {
+        if (!patchedAssets.add(assets)) {
+            return Result.Ok("their table is already on @${idOf(assets)}", alreadyDone = true)
+        }
+        val apk = pigeon.sourceDir ?: run {
+            // Removed again so a later call can retry: unlike a missing DexPathList field, an
+            // unreadable package path is a transient condition (a mid-update install), and pinning
+            // this AssetManager as done-and-failed would outlive the cause.
+            patchedAssets.remove(assets)
+            return Result.Failed("their APK path is unknown")
+        }
+
+        val result = try {
+            val addAssetPath = AssetManager::class.java
+                .getMethod("addAssetPath", String::class.java)
+            val cookie = addAssetPath.invoke(assets, apk) as? Int
+            when {
+                cookie == null || cookie == 0 ->
+                    Result.Failed("addAssetPath on @${idOf(assets)} returned $cookie")
+                verifyWith == null ->
+                    Result.Ok("cookie $cookie on @${idOf(assets)}, unverified")
+                else -> verify(verifyWith, cookie, assets)
+            }
+        } catch (e: ReflectiveOperationException) {
+            // addAssetPath is greylisted, not public. A future Android that enforces the greylist
+            // harder ends hosting and leaves everything reflective working, same as installDex.
+            Result.Failed("addAssetPath is not reachable (${e.javaClass.simpleName})")
+        } catch (e: LinkageError) {
+            Result.Failed("their table would not load (${e.javaClass.simpleName})")
+        }
+
+        if (result is Result.Failed) patchedAssets.remove(assets)
+        Log.i(TAG, "installResources -> $result")
+        return result
+    }
+
+    /**
+     * Confirm one of their ids resolves through [resources] after the merge.
+     *
+     * [KnownTheirLayout] is a canary, not a dependency: nothing here needs that specific layout,
+     * and no code of ours ever draws it. It is checked because a merge that lands but resolves
+     * nothing is indistinguishable from a merge that worked until an Activity tries to inflate
+     * something, at which point the exception names a frame in *their* code and points nowhere near
+     * the real cause.
+     *
+     * Failing the canary does **not** fail the install. Their build could rename or renumber that
+     * layout, and refusing to host a game because a probe constant went stale would be the tail
+     * wagging the dog. The result says the canary is missing, and the caller can decide.
+     */
+    private fun verify(
+        resources: android.content.res.Resources,
+        cookie: Int,
+        assets: AssetManager,
+    ): Result = try {
+        val name = resources.getResourceName(KnownTheirLayout)
+        Result.Ok("cookie $cookie on @${idOf(assets)}, 0x%08x = %s".format(KnownTheirLayout, name))
+    } catch (e: android.content.res.Resources.NotFoundException) {
+        Result.Ok(
+            "cookie $cookie on @${idOf(assets)}, but 0x%08x still resolves to nothing — their "
+                .format(KnownTheirLayout) +
+                "build may have renumbered it, so treat the merge as unconfirmed",
+        )
+    }
+
+    /**
+     * Merge their table into every live `Resources` in this process.
+     *
+     * The awkward case this exists for: [HostedComponentFactory.instantiateActivity] is handed a
+     * `ClassLoader`, a class name and an `Intent` — **no Context**. The table it has to patch was
+     * built moments earlier by `createBaseContextForActivity` and is not addressable from anything
+     * in that signature.
+     *
+     * `ResourcesManager` is the one object that knows about all of them. It is a process singleton
+     * and keeps every `ResourcesImpl` it has built in `mResourceImpls`, a
+     * `Map<ResourcesKey, WeakReference<ResourcesImpl>>`. Measured from a real Activity: seven live
+     * entries, and that Activity's own `AssetManager` among them.
+     *
+     * ## Why every table and not just the newest
+     *
+     * There is no ordering guarantee in that map worth relying on — it is keyed by `ResourcesKey`,
+     * not by age — so "the newest" would have to be inferred, and an inference that is wrong once
+     * produces a game that launches blank on some path nobody can reproduce. Patching all of them
+     * costs one `addAssetPath` per table on the first hosted launch and nothing thereafter, because
+     * [patchedAssets] remembers each one. Tables built *later* are not covered by this call, which
+     * is why the per-object guard matters more than the sweep does: the next hosted launch sweeps
+     * again and picks them up.
+     *
+     * Returns a [Result] describing the sweep as a whole. A partial success is reported as success
+     * with counts, because one unpatchable table among seven is not a reason to abandon a launch —
+     * the one that matters is very likely among the rest, and the alternative to trying is a
+     * guaranteed `NotFoundException`.
+     */
+    fun installResourcesEverywhere(pigeon: InstalledOpenPigeon): Result {
+        val tables = try {
+            liveResources()
+        } catch (e: ReflectiveOperationException) {
+            return Result.Failed("ResourcesManager is not reachable (${e.javaClass.simpleName})")
+        } catch (e: LinkageError) {
+            return Result.Failed("ResourcesManager is not reachable (${e.javaClass.simpleName})")
+        }
+        if (tables.isEmpty()) return Result.Failed("no live Resources found to merge into")
+
+        var merged = 0
+        var already = 0
+        var refused = 0
+        for (resources in tables) {
+            when (val one = installResources(pigeon, resources.assets, resources)) {
+                is Result.Ok -> if (one.alreadyDone) already++ else merged++
+                is Result.Failed -> refused++
+            }
+        }
+        val detail = "$merged merged, $already already, $refused refused of ${tables.size} tables"
+        return if (refused == tables.size) {
+            Result.Failed(detail)
+        } else {
+            Result.Ok(detail, alreadyDone = merged == 0)
+        }
+    }
+
+    /**
+     * Every `Resources` this process currently has alive.
+     *
+     * Reconstructed from `ResourcesManager.mResourceImpls` rather than from any Context, because
+     * the caller that needs this has no Context. Each value is a `WeakReference<ResourcesImpl>`;
+     * cleared ones are skipped rather than treated as an error, since an evicted table is exactly
+     * the case this is supposed to tolerate.
+     *
+     * `ResourcesImpl` is not a `Resources` — it is the shared implementation several `Resources`
+     * objects can point at — so a throwaway `Resources` is wrapped around each one purely to have
+     * something with an `assets` property and a `getResourceName`. That wrapper is never handed to
+     * their code; only the `AssetManager` inside it is shared, and that is the object being merged
+     * into.
+     */
+    @Throws(ReflectiveOperationException::class)
+    private fun liveResources(): List<android.content.res.Resources> {
+        val rmClass = Class.forName("android.app.ResourcesManager")
+        val manager = rmClass.getMethod("getInstance").invoke(null)
+        val impls = rmClass.getDeclaredField("mResourceImpls")
+            .apply { isAccessible = true }
+            .get(manager) as? Map<*, *>
+            ?: throw NoSuchFieldException("mResourceImpls is not a Map")
+
+        val assetsField = Class.forName("android.content.res.ResourcesImpl")
+            .getDeclaredField("mAssets").apply { isAccessible = true }
+
+        val seen = mutableSetOf<AssetManager>()
+        return impls.values.mapNotNull { ref ->
+            val impl = (ref as? Reference<*>)?.get() ?: return@mapNotNull null
+            val assets = assetsField.get(impl) as? AssetManager ?: return@mapNotNull null
+            // Several ResourcesImpl can share one AssetManager. Merging twice is harmless — the
+            // per-object guard catches it — but the counts in the sweep's result would lie.
+            if (!seen.add(assets)) return@mapNotNull null
+            @Suppress("DEPRECATION")
+            android.content.res.Resources(assets, null, null)
+        }
+    }
+
+    private fun idOf(any: Any) = Integer.toHexString(System.identityHashCode(any))
 
     /**
      * The soname a `dlopen` failure blames, or `null` if the failure is not a missing dependency.

@@ -101,14 +101,13 @@ object ForeignResourcesReport {
     }
 
     /**
-     * An id from *their* table, used as the question every route is asked.
+     * The id every route is asked about.
      *
-     * This is the exact layout id their `KnockoutActivity.onCreate` passes to `setContentView`,
-     * taken from the `Resources$NotFoundException` that closing gate 3 revealed. A real id from a
-     * real failure is worth more than a synthetic one: if this resolves, the launch that produced
-     * that stack trace gets further.
+     * Owned by [ForeignCode] rather than declared here, because the merge this report measures is
+     * now performed in production and verified against the same id. Two copies of a magic number
+     * that must agree is one copy too many.
      */
-    const val TheirKnockoutLayout = 0x7f0c001d
+    const val TheirKnockoutLayout = ForeignCode.KnownTheirLayout
 
     /**
      * Both routes, run against the installed OpenPigeon, as printable lines.

@@ -95,8 +95,18 @@ class HostedComponentFactory : CoreComponentFactory() {
         val started = android.os.SystemClock.elapsedRealtime()
         val dex = ForeignCode.installDex(pigeon)
         val runtime = ForeignCode.loadLibrary(pigeon, CppRuntime)
+        // Last, and deliberately not through `pigeon` or any Context we hold: the table that has to
+        // be merged into belongs to the Activity being built, which the framework created in
+        // createBaseContextForActivity moments ago and did not hand to us. installResourcesEverywhere
+        // finds it through ResourcesManager. Patching appContext()'s table instead would compile,
+        // log success, and change nothing — an Activity's AssetManager is a different object.
+        val resources = ForeignCode.installResourcesEverywhere(pigeon)
         val elapsed = android.os.SystemClock.elapsedRealtime() - started
-        Log.i(TAG, "prepared for $className in $elapsed ms — dex=$dex runtime=$runtime")
+        Log.i(
+            TAG,
+            "prepared for $className in $elapsed ms — " +
+                "dex=$dex runtime=$runtime resources=$resources",
+        )
     }
 
     /**
