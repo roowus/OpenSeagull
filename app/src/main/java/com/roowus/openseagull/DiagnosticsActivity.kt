@@ -6,6 +6,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.roowus.openseagull.host.ForeignGameCatalog
+import com.roowus.openseagull.host.ForeignResourcesReport
 import com.roowus.openseagull.host.InstalledOpenPigeon
 
 /**
@@ -55,6 +56,16 @@ class DiagnosticsActivity : AppCompatActivity() {
         appendLine("version:       ${pigeon.versionName ?: "unknown"}")
         appendLine("dataDir(them): ${pigeon.packageContext.applicationInfo.dataDir}")
         appendLine("dataDir(us):   ${applicationInfo.dataDir}")
+        appendLine()
+
+        // Ahead of the catalog because it is the live blocker and because the catalog's own
+        // isEmpty branch returns early — a reading placed after it would vanish exactly when
+        // something else had already gone wrong.
+        //
+        // This runs here, in an ordinary launched Activity, rather than in an instrumented test,
+        // because the question it asks is whether a greylisted call is permitted, and `am
+        // instrument` can be told to permit it. See ForeignResourcesReport.
+        ForeignResourcesReport.of(this@DiagnosticsActivity, pigeon).forEach { appendLine(it) }
         appendLine()
 
         val catalog = ForeignGameCatalog.of(pigeon)
