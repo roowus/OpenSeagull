@@ -156,17 +156,27 @@ class RuntimeHostProbe {
         }
     }
 
-    /** We ship no OpenPigeon code: their classes must not be present in our own APK. */
+    /**
+     * We ship no OpenPigeon code: their classes must not be present in our own APK.
+     *
+     * Checked through a throwaway loader over just our APK rather than [javaClass.classLoader],
+     * and not as a nicety: `installDex` appends their dex to the process-wide loader, so any other
+     * test in this class that ran first makes the shared loader answer "present" for classes our
+     * APK has never carried. Through that loader this gate's verdict would depend on JUnit's
+     * execution order — which is exactly how it failed once on emulator-5554 while every static
+     * check (CI's release-dex grep) stayed green.
+     */
     @Test
     fun weShipNoOpenPigeonCode() {
-        val ourLoader = javaClass.classLoader!!
+        val info = ctx().applicationInfo
+        val isolated = dalvik.system.PathClassLoader(info.sourceDir, null)
         for (fqcn in listOf(
             "com.openbubbles.openpigeon.MadridExtension",
             "com.openbubbles.openpigeon.Game",
             "com.openbubbles.openpigeon.pool.Drand48",
         )) {
             val found = try {
-                ourLoader.loadClass(fqcn); true
+                isolated.loadClass(fqcn); true
             } catch (_: ClassNotFoundException) {
                 false
             }
