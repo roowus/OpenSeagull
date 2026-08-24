@@ -1,6 +1,7 @@
 package com.roowus.openseagull
 
 import android.os.Bundle
+import android.content.Intent
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 
@@ -48,6 +49,32 @@ class UnsupportedGameActivity : AppCompatActivity() {
     }
 
     companion object {
+
+        /**
+         * Start the dialog, from anywhere.
+         *
+         * Both places that explain a dead balloon — the host's tap callback in
+         * `MadridExtension` and the balloon's own PendingIntent in `BalloonTapActivity` — say the
+         * same thing, so they share one launcher rather than two copies of the intent shape.
+         * `NEW_TASK` is required: both callers hold application-side contexts, which the framework
+         * refuses to start activities from without it.
+         */
+        fun launch(context: android.content.Context, name: String, reason: String) {
+            val intent = Intent(context, UnsupportedGameActivity::class.java).apply {
+                putExtra("DISPLAY_GAME", name)
+                putExtra(REASON, reason)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                context.startActivity(intent)
+            } catch (_: android.content.ActivityNotFoundException) {
+                // Ours, declared in our own manifest — cannot happen without a build fault, and
+                // both callers are already on a failure path where a crash would cost more than
+                // the silence.
+                android.util.Log.e("SEAGULL", "UnsupportedGameActivity is not declared — check the manifest")
+            }
+        }
+
         /**
          * Extra carrying the already-worded explanation.
          *

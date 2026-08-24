@@ -52,6 +52,22 @@
             </intent-filter>
         </activity>
 
+        <!-- The tap target a balloon carries. OpenBubbles renders our balloon as a native
+             platform view inside its Flutter UI, and a touch landing there never reaches the
+             Flutter InkWell that would invoke didTapTemplate — measured on-device as one delivery
+             in twelve taps, with no error anywhere. OpenPigeon solves this by baking
+             actionStartActivity into its Glance view; we bake setOnClickPendingIntent pointing
+             here. The trampoline registers the session (their activity binds for it on onCreate)
+             and hands off. Theme.NoDisplay: it draws nothing and finishes promptly.
+
+             Not exported: the PendingIntents are created in our process; nobody else needs in. -->
+        <activity
+            android:name=".BalloonTapActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:noHistory="true"
+            android:excludeFromRecents="true" />
+
         <!-- Says why a tapped balloon did not open. Ours, not theirs: their GameNotFound fires
              Mixpanel analytics from a hardcoded token and needs a Material3 theme overlay we carry
              no dependency for — see UnsupportedGameActivity.

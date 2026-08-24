@@ -1,5 +1,6 @@
 package com.roowus.openseagull
 
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Handler
@@ -397,53 +398,6 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
     }
 
     /**
-     * What a balloon turns out to be: the installed game, its decoded board, and the name to call
-     * it by.
-     *
-     * [name] is not `board["game"]`. The wire name and the game's own name are not always equal —
-     * an 8 Ball+ balloon says `pool3` while the game answering to it reports `pool` — and their
-     * code passes the *game's* name as the `GAME` extra. Resolving it once here means the extra and
-     * the session id can never disagree, and [getLiveView] and [openBalloon] cannot drift apart on
-     * which one they used.
-     */
-    private data class Balloon(
-        val game: ForeignGame,
-        val board: Map<String, String>,
-        val name: String,
-    )
-
-    /**
-     * Decode [message] and find the installed game that owns it, or `null` with a reason logged.
-     *
-     * Shared by [openBalloon] and [getLiveView] because a tap and a render must agree about what a
-     * balloon *is*. Two copies of this prefix would be two chances to resolve the same payload to
-     * different games — a board drawn from one game's art and opened into another's activity.
-     *
-     * Raises [ForeignCallException] rather than swallowing it: `decode`, the catalog initialiser
-     * and `byName` all run their code, and both callers already have a handler that says which
-     * caller was in flight. Only the "we could not read it" cases are `null` here, and each logs
-     * what it could not read.
-     */
-    private fun readBalloon(
-        p: InstalledOpenPigeon,
-        message: MadridMessage,
-        sessionId: String,
-    ): Balloon? {
-        // decode() logs which of its four ways it failed, so there is nothing to add here.
-        val board = ForeignPayload.decode(p, message.url) ?: return null
-
-        val wanted = board["game"] ?: run {
-            Log.w(TAG, "decoded board names no game — ignoring ${sessionId.take(8)}…")
-            return null
-        }
-        val game = ForeignGameCatalog.of(p).byName(wanted) ?: run {
-            Log.w(TAG, "no installed game answers to '$wanted'")
-            return null
-        }
-        return Balloon(game, board, game.name ?: wanted)
-    }
-
-    /**
      * The body of [didTapTemplate], minus the argument guards.
      *
      * Split out so the single `catch (ForeignCallException)` above covers every foreign call in one
@@ -463,7 +417,7 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
             Log.w(TAG, "balloon tap but OpenPigeon is gone — cannot open ${sessionId.take(8)}…")
             return
         }
-        val (game, board, name) = readBalloon(p, message, sessionId) ?: return
+        val (game, board, name) = readBalloon(p, message.url, sessionId) ?: return
         val shown = board["game_name"]?.takeIf { it.isNotBlank() } ?: name
         if (!game.isSupported(board)) {
             // Their own default is `true`; a game that overrides it to refuse is telling us the
@@ -523,28 +477,13 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
     /**
      * Tell the user why a tap went nowhere.
      *
-     * Every path into here has already logged; this is the half the user can see. Separate from the
-     * logging rather than folded into it because the two have different audiences and the log line
-     * names classes, which a dialog should not.
-     *
-     * `NEW_TASK` is required — [context] is an application context, and the framework refuses to
-     * start an activity from one without it. No `CLEAR_TASK`: this is a message, not a board, and it
-     * has nothing of its own to clear.
+     * Every path into here has already logged; this is the half the user can see. The intent shape
+     * lives on [UnsupportedGameActivity.launch] rather than here, because `BalloonTapActivity`
+     * explains the same two failures and two copies of the shape would be two chances to give the
+     * dialog different extras.
      */
     private fun explain(name: String, reason: String) {
-        val intent = Intent(context, UnsupportedGameActivity::class.java).apply {
-            putExtra("DISPLAY_GAME", name)
-            putExtra(UnsupportedGameActivity.REASON, reason)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        try {
-            context.startActivity(intent)
-        } catch (e: android.content.ActivityNotFoundException) {
-            // Ours, declared in our own manifest, so this cannot happen without a build fault. Log
-            // rather than throw: the caller is already on a failure path and taking the host's
-            // binder thread down over a dialog would turn a nuisance into a crash.
-            Log.e(TAG, "UnsupportedGameActivity is not declared — check the manifest", e)
-        }
+        UnsupportedGameActivity.launch(context, name, reason)
     }
 
     /**
@@ -595,7 +534,7 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         SessionRegistry.attachHandle(sessionId, handle)
 
         val balloon = try {
-            readBalloon(p, message, sessionId)
+            readBalloon(p, message.url, sessionId)
         } catch (e: ForeignCallException) {
             Log.w(TAG, "OpenPigeon threw rendering ${sessionId.take(8)}…", e)
             null
@@ -668,6 +607,32 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
                 "art=${if (boardBitmap != null) "yes" else "none"} " +
                 "sub=${if (subcaption != null) "yes" else "no"}",
         )
+
+        // The tap target, baked into the view as theirs is. Measured against a real host, the
+        // contract's own tap path is not reliable: the balloon is a native RemoteViews platform
+        // view inside the host's Flutter UI, and a touch that lands on it never reaches the
+        // Flutter InkWell that would invoke `extension-template-tap`. Twelve taps, one delivery.
+        // OpenPigeon's balloon carries `actionStartActivity` for the same reason; this is the
+        // plain-RemoteViews equivalent, aimed at a trampoline of ours that registers the session
+        // and hands off to the hosted activity. See [BalloonTapActivity].
+        //
+        // Per-session request code: the PendingIntent carries this balloon's url, and a shared
+        // code with FLAG_UPDATE_CURRENT would rewrite every balloon's intent to the newest
+        // render's url — making all of them open the most recently drawn game.
+        message.session?.let { session ->
+            if (!message.url.isNullOrEmpty()) {
+                val tap = PendingIntent.getActivity(
+                    context,
+                    session.hashCode(),
+                    Intent(context, BalloonTapActivity::class.java).apply {
+                        putExtra("SESSION", session)
+                        putExtra("URL", message.url)
+                    },
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                )
+                views.setOnClickPendingIntent(R.id.balloon_root, tap)
+            }
+        }
         return views
     }
 
@@ -766,8 +731,62 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         return views
     }
 
-    private companion object {
+    companion object {
         const val TAG = "SEAGULL"
+
+        /**
+         * What a balloon turns out to be: the installed game, its decoded board, and the name to
+         * call it by.
+         *
+         * [name] is not `board["game"]`. The wire name and the game's own name are not always
+         * equal — an 8 Ball+ balloon says `pool3` while the game answering to it reports `pool` —
+         * and their code passes the *game's* name as the `GAME` extra. Resolving it once here
+         * means the extra and the session id can never disagree, and every caller that decodes a
+         * balloon agrees on which one it used.
+         */
+        internal data class Balloon(
+            val game: ForeignGame,
+            val board: Map<String, String>,
+            val name: String,
+        )
+
+        /**
+         * Decode a balloon URL and find the installed game that owns it, or `null` with a reason
+         * logged.
+         *
+         * Shared by [openBalloon], [getLiveView], and `BalloonTapActivity` because a tap, a
+         * render, and a PendingIntent launch must all agree about what a balloon *is*. Two copies
+         * of this prefix would be two chances to resolve the same payload to different games — a
+         * board drawn from one game's art and opened into another's activity.
+         *
+         * Takes the URL rather than a [MadridMessage] because the PendingIntent path has no
+         * message object — it carries the URL the render decoded from, which is the same string.
+         * Nothing else of the message is read here.
+         *
+         * Raises [ForeignCallException] rather than swallowing it: `decode`, the catalog
+         * initialiser and `byName` all run their code, and every caller already has a handler
+         * that says which caller was in flight. Only the "we could not read it" cases are `null`
+         * here, and each logs what it could not read.
+         */
+        internal fun readBalloon(
+            p: InstalledOpenPigeon,
+            url: String?,
+            sessionId: String,
+        ): Balloon? {
+            // decode() logs which of its four ways it failed, so there is nothing to add here.
+            val board = ForeignPayload.decode(p, url) ?: return null
+
+            val wanted = board["game"] ?: run {
+                Log.w(TAG, "decoded board names no game — ignoring ${sessionId.take(8)}…")
+                return null
+            }
+            val game = ForeignGameCatalog.of(p).byName(wanted) ?: run {
+                Log.w(TAG, "no installed game answers to '$wanted'")
+                return null
+            }
+            return Balloon(game, board, game.name ?: wanted)
+        }
+
 
         /** Delay before the second `updateView`, matching OpenPigeon's workaround. */
         const val RedrawSettleMs = 50L

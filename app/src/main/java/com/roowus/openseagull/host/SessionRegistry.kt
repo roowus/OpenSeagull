@@ -122,6 +122,25 @@ object SessionRegistry {
     private val sessions = ConcurrentHashMap<String, Session>()
 
     /**
+     * Handles the host handed us for balloons that have rendered but never opened.
+     *
+     * `getLiveView` receives a fresh `IMessageViewHandle` on every render — including the first
+     * one, long before anyone taps. Until 2026-08-24 [attachHandle] dropped those, because there
+     * was no session to attach to and nothing needed it: the tap was expected to arrive through
+     * `didTapTemplate`, which brings its own handle. Two facts from testing against a real host
+     * changed that. The host's tap delivery to a rendered balloon is unreliable (touches land on
+     * the native RemoteViews view and die there — see `BalloonTapActivity` for the fix), so the
+     * *render's* handle is now the one a first open will usually have. And the host `markDead()`s
+     * the tap handle immediately after the tap callback, so a tap-delivered handle is worth less
+     * than a render-delivered one anyway.
+     *
+     * Replacing rather than keeping several: the newest handle is always the live one — the same
+     * rule [attachHandle] applies to open sessions. Unbounded but self-limiting: entries leave on
+     * [open], and it only ever holds one handle per rendered balloon.
+     */
+    private val pendingHandles = ConcurrentHashMap<String, IMessageViewHandle>()
+
+    /**
      * Register a session so their game can read it, replacing any previous entry for [id].
      *
      * Replacing rather than merging is deliberate: a re-open re-derives the message from the
@@ -137,7 +156,11 @@ object SessionRegistry {
         // hands us a handle before the tap that opens the session, and `messageUpdated` re-opens a
         // session that is already open every time the opponent moves — which would strip the handle
         // from a game in progress, at exactly the moment write-back is about to need it.
-        session.handle = sessions[id]?.handle
+        //
+        // The third source is [pendingHandles]: the render of a balloon nobody has tapped yet.
+        // Without that stash the very first open of a session would have no handle at all, and a
+        // game that writes a move back before the next render would send it nowhere.
+        session.handle = sessions[id]?.handle ?: pendingHandles.remove(id)
         sessions[id] = session
         Log.i(
             TAG,
@@ -152,13 +175,18 @@ object SessionRegistry {
      * Record the host's way back to this balloon, replacing any previous one.
      *
      * Their `getSessionFor` calls `updateHandle(handle)` on every render of a session it already
-     * knows, so a fresh handle always wins — this does the same. Silently does nothing for a
-     * session we have not opened: the host renders balloons we have never been tapped into, and
-     * that is not an error, just a handle with nowhere to go yet.
+     * knows, so a fresh handle always wins — this does the same. For a session we have not
+     * opened, the handle goes to [pendingHandles] instead of the bin: the host renders balloons
+     * long before anyone taps them, and since the balloon's own click PendingIntent (not the
+     * host's tap callback) is what opens a game, that render-time handle is the one the first
+     * [open] will need.
      */
     fun attachHandle(id: String, handle: IMessageViewHandle?) {
         if (handle == null) return
-        val session = sessions[id] ?: return
+        val session = sessions[id] ?: run {
+            pendingHandles[id] = handle
+            return
+        }
         val replacing = session.handle != null && session.handle !== handle
         session.handle = handle
         if (replacing) Log.i(TAG, "handle replaced id=${id.take(8)}…")
@@ -261,5 +289,6 @@ object SessionRegistry {
     /** Drop every session. Used when the extension is released, and by tests. */
     fun clear() {
         sessions.clear()
+        pendingHandles.clear()
     }
 }
