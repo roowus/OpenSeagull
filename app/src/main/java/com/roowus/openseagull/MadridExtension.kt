@@ -501,6 +501,13 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
             // Their class loaded but our manifest does not declare it — a game family we have not
             // added an <activity> for. The session is dropped again so a later, working tap starts
             // from the balloon rather than from a stale board.
+            //
+            // One case is known and reaches here by design rather than by omission: their
+            // `WordGames` is in the shipped catalog, overrides `gameClass()` to return their
+            // `GameNotFound` dialog, and does not override `isSupported`, so the check above lets
+            // it through. Declaring `GameNotFound` would swap this log line for their "not found"
+            // dialog — the same outcome, said to the user instead of to logcat. Worth doing, not
+            // yet done.
             Log.w(TAG, "no <activity> declared for ${target.name} — dropping the session", e)
             SessionRegistry.close(sessionId)
         }

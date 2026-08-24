@@ -76,9 +76,32 @@
              - No android:theme. Theirs say Theme.OpenBubblesSampleExtension, which lives in their
                resource table; an id from their dex means nothing against ours, and pointing at our
                own theme of the same name would be a different theme wearing the right label. These
-               inherit the application theme until their table is merged in, so a hosted board may
-               be styled wrongly before it is styled correctly. That is a visible bug, not a silent
-               one, which is the right way round.
+               inherit Theme.OpenSeagull, and what that costs was audited against their tree rather
+               than guessed at:
+
+               Theirs is Theme.MaterialComponents.DayNight.DarkActionBar; ours is
+               Theme.AppCompat.DayNight.NoActionBar. The two ways that gap usually turns into a
+               crash both miss. No layout of theirs inflates a com.google.android.material widget —
+               all four use framework views plus ConstraintLayout — so nothing demands the Material
+               theme attrs an AppCompat parent lacks; and every setContent call themes itself with
+               its own MaterialTheme(colorScheme = …) rather than bridging from the XML theme, so
+               Compose does not read our table either. The five supportActionBar?.hide() calls are
+               null-safe and already no-ops under a NoActionBar parent, which is the same end state
+               their DarkActionBar parent reaches one line later.
+
+               What is left is genuinely cosmetic and worth naming so nobody re-audits it: their
+               colorPrimary/colorSecondary palette (purple_500/teal_200) is not ours, and their
+               statusBarColor binding to colorPrimaryVariant is absent. Anything of theirs drawn
+               from theme attrs rather than from Compose picks up seagull_teal instead of purple.
+
+               One entry does diverge in kind rather than degree. SecretWordActivity is declared
+               under Theme.Material3.DayNight.Dialog.Alert in their manifest and inherits a
+               full-screen theme here. Its onCreate sets a transparent window background and
+               FLAG_DIM_BEHIND itself, so it composes as a floating card regardless — but the
+               window is full-bleed rather than dialog-sized, and only an on-device look will say
+               whether that reads as intended. Unreached today in any case: nothing in our launch
+               path starts it. It is reached only from their QuestionsGame.configure, and 20
+               Questions routes a tap to GodotGameActivity via gameClass().
              - exported="false" is kept from theirs and is not a formality: these must be startable
                by us and by nobody else, exactly as upstream has it.
 
