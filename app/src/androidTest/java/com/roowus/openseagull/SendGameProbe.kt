@@ -8,8 +8,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.bluebubbles.messaging.MadridMessage
 import com.roowus.openseagull.host.ForeignAppContext
 import com.roowus.openseagull.host.ForeignGameCatalog
+import com.roowus.openseagull.host.ForeignPayload
 import com.roowus.openseagull.host.InstalledOpenPigeon
 import com.roowus.openseagull.host.ParcelBridge
+import com.roowus.openseagull.host.SeagullIdentity
 import org.junit.Test
 import kotlin.test.assertNotNull
 
@@ -384,5 +386,78 @@ class SendGameProbe {
             "shipped path produced a malformed url starting '${url.take(12)}'"
         }
         Log.i(tag, "shipped path OK: url=${url.length} chars, isLive=${message.isLive}")
+    }
+
+    /**
+     * Read our own balloon back, closing the one shipped path that has never executed.
+     *
+     * [ForeignPayload.decode] is what turns a received balloon's `url` into a board — it is on the
+     * inbound path for every game anyone sends us, and until now nothing had ever run it against
+     * the installed dex. Its three failure modes are all silent (`Cryption` class absent, no
+     * `INSTANCE` field, no `decrypt` method), each returning `null` and logging, so a broken
+     * reflection path would present as "received games do not open" with no exception anywhere.
+     *
+     * The round trip is the test that needs no host: their `buildGameMessage` encrypts, ours
+     * decrypts, and the board that comes back must be the board that went in. A decode built on
+     * the wrong field or the wrong receiver cannot accidentally produce the right keys.
+     *
+     * It also checks the send-side identity stamp, which is only observable here — `sender` and
+     * `player2` go in through [ForeignGame.newGameData]'s successor and come out the far side of
+     * their `Cryption`, so this is the only place the two can be compared. Both must equal
+     * [SeagullIdentity], not the per-process UUID their `getSenderUUID` mints.
+     */
+    @Test
+    fun ourOwnBalloonDecodesBackToItsBoard() {
+        val p = pigeonOrSkip() ?: return
+        val game = ForeignGameCatalog.of(p).games.firstOrNull { it.name == "pool" }
+            ?: ForeignGameCatalog.of(p).games.first()
+
+        val sent = game.newGameData()
+        assertNotNull(sent, "no new-game data — nothing to round-trip")
+
+        val myId = SeagullIdentity.senderUuid()
+        val stamped = LinkedHashMap<String, String>()
+        for ((k, v) in sent) if (k is String && v is String) stamped[k] = v
+        if (myId.isNotEmpty()) {
+            stamped["sender"] = myId
+            stamped["player2"] = myId
+        }
+
+        val message = game.buildMessage(stamped, session = null)
+        assertNotNull(message, "buildMessage returned null — nothing to decode")
+
+        val board = ForeignPayload.decode(p, message.url)
+        assertNotNull(
+            board,
+            "ForeignPayload.decode returned null for a balloon their own code just built — " +
+                "the inbound path is dead and every received game would open blank",
+        )
+
+        // Sizes and key names only: the values are game state, and `sender` is an identity.
+        Log.i(
+            tag,
+            "round trip '${game.name}': sent ${stamped.size} keys, decoded ${board.size} " +
+                "(missing=${(stamped.keys - board.keys).sorted()})",
+        )
+
+        for ((key, value) in stamped) {
+            val got = board[key]
+            assert(got == value) {
+                "key '$key' did not survive the round trip: " +
+                    "sent ${value.length} chars, decoded ${got?.length ?: -1}"
+            }
+        }
+
+        if (myId.isNotEmpty()) {
+            assert(board["sender"] == myId) {
+                "decoded sender is not our identity — the stamp did not reach the wire"
+            }
+            assert(board["player2"] == myId) {
+                "decoded player2 is not our identity — the stamp did not reach the wire"
+            }
+            Log.i(tag, "identity survived the wire as ${myId.take(8)}…")
+        } else {
+            Log.w(tag, "SeagullIdentity is empty — identity stamp not exercised")
+        }
     }
 }
