@@ -2,4 +2,11 @@
     <style name="Theme.OpenSeagull" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="colorPrimary">@color/seagull_teal</item>
     </style>
+
+    <!-- For UnsupportedGameActivity, which is a dialog and nothing else. Without this it inherits
+         the full-screen parent above and the AlertDialog floats over an opaque backdrop that looks
+         like a blank screen the dialog happens to be sitting on. -->
+    <style name="Theme.OpenSeagull.Dialog" parent="Theme.AppCompat.DayNight.Dialog.Alert">
+        <item name="colorPrimary">@color/seagull_teal</item>
+    </style>
 </resources>

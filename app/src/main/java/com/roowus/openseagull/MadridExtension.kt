@@ -464,14 +464,20 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
             return
         }
         val (game, board, name) = readBalloon(p, message, sessionId) ?: return
+        val shown = board["game_name"]?.takeIf { it.isNotBlank() } ?: name
         if (!game.isSupported(board)) {
             // Their own default is `true`; a game that overrides it to refuse is telling us the
             // payload was written by a protocol version the installed code does not understand.
+            //
+            // Theirs routes this case to `GameNotFound` rather than swallowing it, and so does ours
+            // — a tap that produces nothing at all is indistinguishable from a tap that missed.
             Log.i(TAG, "'$name' refuses this payload as unsupported — not opening")
+            explain(shown, UnsupportedGameActivity.payloadRefused(shown))
             return
         }
         val target = game.gameClass() ?: run {
             Log.w(TAG, "'$name' reports no gameClass — nothing to launch")
+            explain(shown, UnsupportedGameActivity.notHosted(shown))
             return
         }
 
@@ -505,11 +511,38 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
             // One case is known and reaches here by design rather than by omission: their
             // `WordGames` is in the shipped catalog, overrides `gameClass()` to return their
             // `GameNotFound` dialog, and does not override `isSupported`, so the check above lets
-            // it through. Declaring `GameNotFound` would swap this log line for their "not found"
-            // dialog — the same outcome, said to the user instead of to logcat. Worth doing, not
-            // yet done.
+            // it through. Their `GameNotFound` is not something we can host — see
+            // [UnsupportedGameActivity] for why — so the user gets ours instead.
             Log.w(TAG, "no <activity> declared for ${target.name} — dropping the session", e)
             SessionRegistry.close(sessionId)
+            explain(shown, UnsupportedGameActivity.notHosted(shown))
+        }
+    }
+
+    /**
+     * Tell the user why a tap went nowhere.
+     *
+     * Every path into here has already logged; this is the half the user can see. Separate from the
+     * logging rather than folded into it because the two have different audiences and the log line
+     * names classes, which a dialog should not.
+     *
+     * `NEW_TASK` is required — [context] is an application context, and the framework refuses to
+     * start an activity from one without it. No `CLEAR_TASK`: this is a message, not a board, and it
+     * has nothing of its own to clear.
+     */
+    private fun explain(name: String, reason: String) {
+        val intent = Intent(context, UnsupportedGameActivity::class.java).apply {
+            putExtra("DISPLAY_GAME", name)
+            putExtra(UnsupportedGameActivity.REASON, reason)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            context.startActivity(intent)
+        } catch (e: android.content.ActivityNotFoundException) {
+            // Ours, declared in our own manifest, so this cannot happen without a build fault. Log
+            // rather than throw: the caller is already on a failure path and taking the host's
+            // binder thread down over a dialog would turn a nuisance into a crash.
+            Log.e(TAG, "UnsupportedGameActivity is not declared — check the manifest", e)
         }
     }
 

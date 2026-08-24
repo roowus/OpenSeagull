@@ -52,6 +52,24 @@
             </intent-filter>
         </activity>
 
+        <!-- Says why a tapped balloon did not open. Ours, not theirs: their GameNotFound fires
+             Mixpanel analytics from a hardcoded token and needs a Material3 theme overlay we carry
+             no dependency for — see UnsupportedGameActivity.
+
+             Not exported: only our own tap path starts it, and the reason string it displays is
+             composed here rather than accepted from outside.
+
+             taskAffinity/excludeFromRecents/noHistory match the treatment SecretWordActivity gets
+             below and for the same reason — a transient message should not outlive its dismissal or
+             leave a card in recents pretending a game is open. -->
+        <activity
+            android:name=".UnsupportedGameActivity"
+            android:exported="false"
+            android:taskAffinity="${applicationId}.utility"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.OpenSeagull.Dialog" />
+
         <!-- Hosted OpenPigeon games.
              Measured by HostedActivityProbe: after ForeignCode.installDex their Activity class is
              resolvable by our loader, and starting it still fails —
