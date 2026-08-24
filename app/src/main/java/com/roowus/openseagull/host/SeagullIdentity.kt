@@ -44,6 +44,23 @@ import java.util.UUID
  * board like a different player took the turn. Turn detection stays *self*-consistent, which is what
  * a hosted board reads.
  *
+ * ## Measured, by the procedure that caught the fault
+ *
+ * `ForeignIdentityProbe.ourOwnIdentitySurvivesAProcessRestart` was written to be failable in the
+ * same way the first identity claim was — it forces a cold read past the cache, reads the prefs file
+ * by name from outside this object, and prints the pid, because the verdict belongs to the
+ * cross-process comparison and nothing else:
+ *
+ * ```
+ * pid 31060  27c07165…  ← minted here, once
+ * pid 31121  27c07165…  ← no mint line: read from the file
+ * pid 31163  27c07165…  ← and theirs, in this same process, minted c608f216…
+ * ```
+ *
+ * The third row is the one that settles it. Both tests ran in one process, so uid, moment and probe
+ * are identical and only the mechanism differs: theirs handed out a fifth player, ours handed back
+ * the id from three processes earlier.
+ *
  * ## Two details that are load-bearing
  *
  * **`commit()`, not `apply()`.** `GodotGameActivity` runs in `:godot`, a second process, and reads

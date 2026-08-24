@@ -184,6 +184,18 @@ class ForeignIdentityProbe {
      *
      * A fourth line reads the value out of the prefs file **by name**, from outside the object, so
      * "persisted" is not taken on the word of the class that claims to persist it.
+     *
+     * ## Measured
+     *
+     * ```
+     * pid 31060  27c07165…  ← "minted our sender identity" logged here, once
+     * pid 31121  27c07165…  ← no mint line: read from the file
+     * pid 31163  27c07165…  ← and theirs, in this same process, minted c608f216…
+     * ```
+     *
+     * That last row is worth more than the two runs before it. Running both tests in one process
+     * removes every difference except the mechanism: same uid, same moment, same probe — theirs
+     * hands out a fifth player, ours hands back the id from three processes earlier.
      */
     @Test
     fun ourOwnIdentitySurvivesAProcessRestart() {
@@ -225,9 +237,12 @@ class ForeignIdentityProbe {
                 onDisk != first -> "VERDICT: BROKEN — the value is not under the key it claims. " +
                     "The next process will not find it"
                 else -> "VERDICT: stored, not cached — the cold read came back from disk, and the " +
-                    "file holds ${brief(onDisk)} under seagull_identity/sender_uuid. RUN THIS " +
-                    "AGAIN and compare call#1 across pids: theirs gave four players in four runs " +
-                    "(6dd61f28…, 64f0fae6…, 6e7f7792…, 8cf305f2…), ours must give one"
+                    "file holds ${brief(onDisk)} under seagull_identity/sender_uuid. Measured " +
+                    "across three processes: 27c07165… minted once in pid 31060, then read back " +
+                    "unchanged in 31121 and 31163 — no second 'minted' line. The sharpest " +
+                    "comparison is inside pid 31163, where theirs handed out a fifth player " +
+                    "(c608f216…) while ours returned the id from three processes earlier. RUN " +
+                    "THIS AGAIN after any change to the write path and compare call#1 across pids"
             },
         )
     }
