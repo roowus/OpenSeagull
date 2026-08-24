@@ -75,9 +75,9 @@ class ForeignGame internal constructor(
      *
      * A sender id that changes every process is worse than none for their
      * `isYourTurn = message["sender"] != myId`, which needs an id that outlives the turn. Our own
-     * identity, persisted in our own data directory, is the answer — see [SessionRegistry]. It is
-     * not the id the user plays under in OpenPigeon proper, which is correct for a separate
-     * install rather than a compromise.
+     * identity, persisted in our own data directory, is the answer — see [SeagullIdentity], which
+     * is what [SessionRegistry.Session.senderUuid] now reads. It is not the id the user plays under
+     * in OpenPigeon proper, which is correct for a separate install rather than a compromise.
      *
      * Null means the method is gone or refused.
      */

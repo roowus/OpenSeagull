@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.roowus.openseagull.host.ForeignCode
 import com.roowus.openseagull.host.InstalledOpenPigeon
+import com.roowus.openseagull.host.SeagullIdentity
 import com.roowus.openseagull.host.SessionChannel
 import java.util.Collections
 
@@ -20,8 +21,9 @@ import java.util.Collections
  * Both exist here for the same underlying reason — this class *is* the `applicationContext` their
  * code runs against, and it is the first of our code to run in any process we own:
  *
- * - [onCreate] makes their classes loadable, so the framework can build their Activity at all —
- *   but only below API 28, where [com.roowus.openseagull.host.HostedComponentFactory] cannot run.
+ * - [onCreate] hands [SeagullIdentity] a Context, and — below API 28, where
+ *   [com.roowus.openseagull.host.HostedComponentFactory] cannot run — makes their classes loadable
+ *   so the framework can build their Activity at all.
  * - [bindService] answers their session bind locally, so the Activity it built can read its board.
  *
  * They are strictly ordered and both are required. Without the first, the launch dies in
@@ -91,6 +93,14 @@ class SeagullApplication : Application() {
      */
     override fun onCreate() {
         super.onCreate()
+
+        // Before the SDK gate, deliberately. This is the only line in this method that has to run
+        // in *every* process on *every* level: :godot has no call site of ours before this, and on
+        // API 28+ the dex work below is HostedComponentFactory's job and this method returns two
+        // lines from now. Handing over a Context is free — nothing is read or minted until the
+        // first session opens.
+        SeagullIdentity.attach(this)
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             // HostedComponentFactory has it, and will do it later and more cheaply.
             return

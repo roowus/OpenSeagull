@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.test.platform.app.InstrumentationRegistry
 import com.roowus.openseagull.host.ForeignGameCatalog
 import com.roowus.openseagull.host.InstalledOpenPigeon
+import com.roowus.openseagull.host.SeagullIdentity
 import java.io.File
 import org.junit.Test
 
@@ -156,6 +157,78 @@ class ForeignIdentityProbe {
                 "It differs from the id the user plays under in OpenPigeon proper, which is " +
                 "correct for a separate install with its own data directory — and unlike theirs " +
                 "it survives a process restart, which is the property isYourTurn actually needs",
+        )
+    }
+
+    /**
+     * The repair, measured the same way the fault was: **is ours the same id in the next process?**
+     *
+     * [SeagullIdentity] replaced their throwaway. That is a claim of exactly the kind the first test
+     * here got wrong once already, so it is put through the identical procedure rather than trusted
+     * because the code reads correctly.
+     *
+     * ## What each of the three lines below can and cannot show
+     *
+     * **Two adjacent calls agree.** Necessary, worthless alone — this is the trap their game object
+     * fell into, where a cached field passes for a file.
+     *
+     * **A cold read agrees.** [SeagullIdentity.resetCacheForTest] drops the in-memory copy and
+     * forces the next call through `getSharedPreferences`. This is the one comparison that
+     * distinguishes *stored* from *cached* **within** a process, and it is the one their code could
+     * never have passed: their unreadable prefs would have minted again here.
+     *
+     * **The same id in a new pid.** The verdict. The cold read makes it very likely and does not
+     * prove it, because a cold read still runs against a prefs file this process may have written
+     * moments ago. Only a second run settles it, so the pid is printed and the run must be repeated
+     * — exactly as for theirs, where four runs gave four players.
+     *
+     * A fourth line reads the value out of the prefs file **by name**, from outside the object, so
+     * "persisted" is not taken on the word of the class that claims to persist it.
+     */
+    @Test
+    fun ourOwnIdentitySurvivesAProcessRestart() {
+        val pid = android.os.Process.myPid()
+
+        val first = SeagullIdentity.senderUuid()
+        val second = SeagullIdentity.senderUuid()
+
+        // Force the next call past the cache and onto the file. Does not delete the stored id — a
+        // probe that rotated the identity would be causing the fault it reports.
+        SeagullIdentity.resetCacheForTest()
+        val cold = SeagullIdentity.senderUuid()
+
+        // Independent of the class under test: read the file ourselves, under the same names it
+        // uses. If this is empty while the calls above returned a UUID, the value is per-process
+        // after all and the class is lying about persisting it.
+        val onDisk = ctx()
+            .getSharedPreferences("seagull_identity", Context.MODE_PRIVATE)
+            .getString("sender_uuid", null)
+
+        Log.i(
+            tag,
+            "pid=$pid ours call#1=${brief(first)} call#2=${brief(second)} " +
+                "coldRead=${brief(cold)} onDisk=${brief(onDisk)}",
+        )
+
+        Log.i(
+            tag,
+            when {
+                first.isEmpty() -> "VERDICT: empty — attach() never ran, so no Context reached " +
+                    "SeagullIdentity. On a real launch Application.onCreate does this before " +
+                    "anything can open a session; under instrumentation it means the app process " +
+                    "was not started through our Application class"
+                first != second -> "VERDICT: BROKEN — two adjacent calls disagree, so not even the " +
+                    "in-memory cache holds. Worse than theirs"
+                cold != first -> "VERDICT: BROKEN — the cache holds but the FILE does not. A cold " +
+                    "read minted a second id, which is precisely their failure reproduced in our " +
+                    "own prefs. commit() is not landing"
+                onDisk != first -> "VERDICT: BROKEN — the value is not under the key it claims. " +
+                    "The next process will not find it"
+                else -> "VERDICT: stored, not cached — the cold read came back from disk, and the " +
+                    "file holds ${brief(onDisk)} under seagull_identity/sender_uuid. RUN THIS " +
+                    "AGAIN and compare call#1 across pids: theirs gave four players in four runs " +
+                    "(6dd61f28…, 64f0fae6…, 6e7f7792…, 8cf305f2…), ours must give one"
+            },
         )
     }
 

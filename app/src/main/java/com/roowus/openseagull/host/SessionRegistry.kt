@@ -60,15 +60,22 @@ object SessionRegistry {
         internal var lockDepth: Int = 0
 
         /**
-         * Who *we* are in this game, as their `getSenderUUID` reports it.
+         * Who *we* are in this game.
          *
-         * Empty until the balloon-tap half mints one, and that is a known-wrong answer rather than
-         * a neutral one: their `isYourTurn` is `message["sender"] != myId`, so an empty id compares
-         * unequal to every sender and the board says "your turn" unconditionally. [SessionChannel]
-         * logs when it serves an empty value for exactly that reason.
+         * Read from [SeagullIdentity] at construction rather than from their `getSenderUUID`,
+         * because theirs is not an identity: their prefs are unreadable across uids, so their
+         * fallback mints a fresh UUID in every process. That KDoc is on [SeagullIdentity]; the
+         * consequence here is that this field would have changed between one turn and the next.
+         *
+         * A per-session copy rather than a call through to [SeagullIdentity] on every read, so that
+         * a game which opened under one id keeps reading that id for as long as it is open — the
+         * property their `isYourTurn = message["sender"] != myId` actually depends on.
+         *
+         * Still `""` if [SeagullIdentity.attach] never ran, which on Android it always does. That
+         * case keeps [SessionChannel]'s existing warning rather than substituting a throwaway.
          */
         @Volatile
-        internal var senderUuid: String = ""
+        internal var senderUuid: String = SeagullIdentity.senderUuid()
 
         /**
          * Their `IMessageUpdatedCallback`, held opaquely.
@@ -93,7 +100,11 @@ object SessionRegistry {
         val session = Session(id, game)
         session.message = message
         sessions[id] = session
-        Log.i(TAG, "session opened id=${id.take(8)}… game=$game keys=${message.size}")
+        Log.i(
+            TAG,
+            "session opened id=${id.take(8)}… game=$game keys=${message.size} " +
+                "as=${session.senderUuid.take(8).ifEmpty { "<none>" }}…",
+        )
         return session
     }
 
