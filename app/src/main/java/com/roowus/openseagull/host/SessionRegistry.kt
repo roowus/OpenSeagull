@@ -28,10 +28,16 @@ import java.util.concurrent.ConcurrentHashMap
  * ## What is deliberately not done yet
  *
  * [update] merges into memory and notifies, but does **not** persist the result back to the
- * conversation — that needs their `Cryption.encrypt` and a blocking `IMessageViewHandle
- * .updateMessage` off the main thread, which is the balloon-tap half of the project and is not
- * built. A move made in a hosted game will therefore be visible to that game and lost on exit. The
- * log line in [update] says so rather than letting it pass for working.
+ * conversation. That is *write-back*, and it needs three things this object does not have: their
+ * `Cryption.encrypt`, the `IMessageViewHandle` the tap arrived on, and a thread that is not the
+ * main one — `updateMessage` is not `oneway` in the AIDL, so it blocks until the host has taken the
+ * message.
+ *
+ * Reading the other direction is built: [open] is called from `MadridExtension.didTapTemplate` when
+ * a balloon is tapped and again from `messageUpdated` when the other player moves, so a hosted game
+ * reads a real board. It is only the move *out* that stops here. A move made in a hosted game is
+ * therefore visible to that game and lost on exit, and the log line in [update] says so rather than
+ * letting it pass for working.
  */
 object SessionRegistry {
 

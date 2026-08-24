@@ -1,11 +1,13 @@
 package com.roowus.openseagull
 
 import android.content.Context
+import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.os.RemoteException
 import android.util.Log
 import android.widget.RemoteViews
+import androidx.core.net.toUri
 import com.bluebubbles.messaging.IKeyboardHandle
 import com.bluebubbles.messaging.IMadridExtension
 import com.bluebubbles.messaging.IMessageViewHandle
@@ -14,7 +16,9 @@ import com.bluebubbles.messaging.MadridMessage
 import com.roowus.openseagull.host.ForeignCallException
 import com.roowus.openseagull.host.ForeignGame
 import com.roowus.openseagull.host.ForeignGameCatalog
+import com.roowus.openseagull.host.ForeignPayload
 import com.roowus.openseagull.host.InstalledOpenPigeon
+import com.roowus.openseagull.host.SessionRegistry
 import com.roowus.openseagull.ui.GamePicker
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -28,9 +32,10 @@ import java.util.concurrent.Executors
  * OpenPigeon, drawn with their own poster art, and tapping a game **sends** it — which is what a
  * picker tap does in OpenPigeon too, rather than opening a board (see [launchGame]).
  *
- * What is still missing is the other half: tapping a balloon to *play*. [didTapTemplate] is a
- * no-op and [getLiveView] returns the status view rather than a board. Sending is the half that
- * needs no hosted Activity and no game engine, which is why it is the half that works first.
+ * Tapping a received balloon opens it — [didTapTemplate] decodes the payload, registers the session
+ * so their game can read it, and launches their Activity in *our* process. What is still missing is
+ * the balloon's own artwork: [getLiveView] returns the status view rather than a rendered board, so
+ * a received game reads as a line of text until it is tapped.
  *
  * Methods that cannot yet do their job return a status view rather than a stub or an exception, so
  * a bind from OpenBubbles always produces something legible on screen. Where a method is
@@ -268,25 +273,140 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
     }
 
     /**
-     * Opening a game is not wired up yet. Deliberately a no-op: launching the wrong thing would be
-     * worse than doing nothing, and the status view already says where the project stands.
+     * Open a received balloon: decode it, register the session, launch their Activity.
      *
-     * One design question is already settled, and against the convenient answer. OpenPigeon opens
-     * a game with `Intent(context, game.gameClass())` — so the obvious shortcut is to aim that
-     * same Intent at their package and let their process do the work. It cannot be done: every
-     * game activity in their manifest is `android:exported="false"`, which the framework enforces
-     * across packages regardless of signature. `GameSessionService` is exported, but it is the
-     * session channel, not the UI.
+     * ## Where the game runs, and why there was never a choice
      *
-     * So gameplay has to run in *our* process, from their classes, through their ClassLoader —
-     * the same reflective path everything else here uses. That is more work than delegation, but
-     * it is also the only path consistent with not shipping their content.
+     * OpenPigeon opens a game with `Intent(context, game.gameClass())`, so the obvious shortcut is
+     * to aim that same Intent at *their* package and let their process do the work. It cannot be
+     * done: every game activity in their manifest is `android:exported="false"`, which the
+     * framework enforces across packages regardless of signature. `GameSessionService` is exported,
+     * but it is the session channel, not the UI.
+     *
+     * So the Activity runs here. `Intent(context, target)` builds a `ComponentName` from
+     * `target.getName()` — a *string* — so the component resolved is `(our package, their class
+     * name)`, which our manifest declares and [com.roowus.openseagull.host.ForeignCode] makes
+     * loadable. Their class object comes from their ClassLoader and is never cast to anything.
+     *
+     * ## Ordering that is load-bearing
+     *
+     * [SessionRegistry.open] happens **before** `startActivity`, not after. Their game binds
+     * `GameSessionService` from its own `onCreate` and has been measured reading the session ~1.2 s
+     * in; registering afterwards would race that read. Losing the race is not a crash — their
+     * service answers an unknown id with an empty Bundle and throws nothing — so it would surface
+     * as a game that intermittently opens blank.
+     *
+     * Equally, `board["game_name"]` is only available *after* the decode, which is why the payload
+     * is decoded before the Intent is built rather than alongside it.
+     *
+     * ## What is refused, and why refusing is the right answer
+     *
+     * A missing session id, an undecodable payload, a `game` key naming something this build does
+     * not have, a game that says it cannot play this version of the payload — each returns without
+     * launching. The tempting alternative is to open the game anyway on an empty board, and that is
+     * precisely the failure this project keeps finding: their `GameSessionService` answers an
+     * unknown session with an empty Bundle, and their games respond to an empty board by starting a
+     * **new** game over the top of the one the balloon was carrying.
+     *
+     * Their own version guards none of this — `getSessionFor(id: String, …)` is declared non-null
+     * and fed `message.session`, which the AIDL marks `@nullable`, so a Kotlin platform type walks
+     * a `null` key straight into their map.
+     *
+     * Run inline rather than on [composer]: this arrives on a binder thread, not the main thread,
+     * the decode is an LCG pass over a few hundred characters, and queueing it behind a compose in
+     * flight would delay a tap for no gain.
      */
     override fun didTapTemplate(
         message: MadridMessage?,
         handle: IMessageViewHandle?,
         userCount: Int,
-    ) = Unit
+    ) {
+        this.userCount = userCount
+        if (message == null || handle == null) {
+            Log.w(TAG, "balloon tap with no message or handle — nothing to open")
+            return
+        }
+        val sessionId = message.session
+        if (sessionId.isNullOrEmpty()) {
+            Log.w(TAG, "balloon tap carries no session id — refusing to open")
+            return
+        }
+        try {
+            openBalloon(sessionId, message)
+        } catch (e: ForeignCallException) {
+            // Their decrypt or their game object threw on a payload we handed it. Distinct from
+            // "we could not read it", which decode() reports as null and logs on its own terms.
+            Log.w(TAG, "OpenPigeon threw while opening ${sessionId.take(8)}…", e)
+        }
+    }
+
+    /**
+     * The body of [didTapTemplate], minus the argument guards.
+     *
+     * Split out so the single `catch (ForeignCallException)` above covers every foreign call in one
+     * place — decode, `isSupported`, `gameClass` and the catalog's own initialiser can all raise it,
+     * and a `try` per call site would say the same thing five times.
+     */
+    private fun openBalloon(sessionId: String, message: MadridMessage) {
+        val p = pigeon ?: run {
+            Log.w(TAG, "balloon tap but OpenPigeon is gone — cannot open ${sessionId.take(8)}…")
+            return
+        }
+        // decode() logs which of its four ways it failed, so there is nothing to add here.
+        val board = ForeignPayload.decode(p, message.url) ?: return
+
+        val wanted = board["game"] ?: run {
+            Log.w(TAG, "decoded board names no game — refusing to open ${sessionId.take(8)}…")
+            return
+        }
+        val game = ForeignGameCatalog.of(p).byName(wanted) ?: run {
+            Log.w(TAG, "no installed game answers to '$wanted' — refusing to open")
+            return
+        }
+        if (!game.isSupported(board)) {
+            // Their own default is `true`; a game that overrides it to refuse is telling us the
+            // payload was written by a protocol version the installed code does not understand.
+            Log.i(TAG, "'$wanted' refuses this payload as unsupported — not opening")
+            return
+        }
+        val target = game.gameClass() ?: run {
+            Log.w(TAG, "'$wanted' reports no gameClass — nothing to launch")
+            return
+        }
+
+        // The wire name and the game's own name are not always equal: an 8 Ball+ balloon says
+        // `pool3` while the game answering to it reports `pool`. Their code passes the *game's*
+        // name as the GAME extra, so the resolved name is what goes on both the extra and the
+        // session — one value, computed once, so the two can never disagree.
+        val name = game.name ?: wanted
+
+        SessionRegistry.open(sessionId, name, board)
+
+        val intent = Intent(context, target).apply {
+            putExtra("SESSION", sessionId)
+            putExtra("GAME", name)
+            putExtra("DISPLAY_GAME", board["game_name"])
+            // A distinct `data` per tap, as theirs does: without it a second tap on the same
+            // balloon is an Intent equal to the first, which the framework delivers to the
+            // existing task rather than re-running the open path.
+            data = "data://${System.currentTimeMillis()}".toUri()
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        }
+        Log.i(
+            TAG,
+            "opening '$name' session=${sessionId.take(8)}… keys=${board.size} " +
+                "activity=${target.name}",
+        )
+        try {
+            context.startActivity(intent)
+        } catch (e: android.content.ActivityNotFoundException) {
+            // Their class loaded but our manifest does not declare it — a game family we have not
+            // added an <activity> for. The session is dropped again so a later, working tap starts
+            // from the balloon rather than from a stale board.
+            Log.w(TAG, "no <activity> declared for ${target.name} — dropping the session", e)
+            SessionRegistry.close(sessionId)
+        }
+    }
 
     override fun getLiveView(
         callback: IViewUpdateCallback?,
@@ -295,8 +415,39 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         userCount: Int,
     ): RemoteViews = statusView()
 
+    /**
+     * The other side sent a new turn on a conversation we already have open.
+     *
+     * ## Why an unknown session is ignored rather than opened
+     *
+     * [SessionRegistry.find] before [SessionRegistry.update], and **never** `open`. Theirs makes the
+     * same choice with a safe call — `activeSessions[message.session]?.handleNewMessage(message)` —
+     * and it is the right one for a reason worth stating: this is called for every balloon the host
+     * decides to refresh, including ones the user has never tapped. Creating a session here would
+     * fill the registry with boards nobody asked for, and — worse — the *next* tap on such a balloon
+     * would find a session already present and reuse a board decoded at refresh time instead of the
+     * one the tap carried.
+     *
+     * The update is a **replace**, not a merge: this payload is the whole new board, not a delta,
+     * which is what distinguishes it from the `updateSession` path where a game sends only the keys
+     * it changed. [SessionRegistry.update] merges, so it would leave keys the other player removed,
+     * and so the board is written through [SessionRegistry.open] on a session that already exists —
+     * the one case where re-opening is correct rather than a leak.
+     */
     override fun messageUpdated(message: MadridMessage?) {
-        // No sessions are tracked yet, so there is nothing to update.
+        if (message == null) return
+        val sessionId = message.session
+        if (sessionId.isNullOrEmpty()) return
+        val existing = SessionRegistry.find(sessionId) ?: return
+        val p = pigeon ?: return
+        val board = try {
+            ForeignPayload.decode(p, message.url)
+        } catch (e: ForeignCallException) {
+            Log.w(TAG, "OpenPigeon threw decoding an update for ${sessionId.take(8)}…", e)
+            null
+        } ?: return
+        Log.i(TAG, "update on '${existing.game}' session=${sessionId.take(8)}… keys=${board.size}")
+        SessionRegistry.open(sessionId, existing.game, board)
     }
 
     /**

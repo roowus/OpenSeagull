@@ -86,3 +86,24 @@ fun Class<*>.staticIntOrNull(field: String): Int? = try {
 } catch (_: IllegalAccessException) {
     null
 }
+
+/**
+ * Read a static field of reference type, or `null` if absent.
+ *
+ * [staticIntOrNull] cannot do this job: `getInt` unboxes, so it throws `IllegalArgumentException`
+ * on anything that is not a numeric primitive and would report a field that exists as one that does
+ * not. The distinction matters because the field this exists for is a Kotlin `object`'s `INSTANCE`
+ * — the only handle on a singleton whose class we cannot name at compile time.
+ *
+ * Touching the field runs the class's `<clinit>`, so a foreign singleton is *constructed* by this
+ * call. That is the intent, and it is also why `ExceptionInInitializerError` is deliberately not
+ * caught here — a static initialiser that threw is the callee failing, not the field being absent,
+ * and the file's second rule says those must not look alike.
+ */
+fun Class<*>.staticOrNull(field: String): Any? = try {
+    getField(field).get(null)
+} catch (_: NoSuchFieldException) {
+    null
+} catch (_: IllegalAccessException) {
+    null
+}
