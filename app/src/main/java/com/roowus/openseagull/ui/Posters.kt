@@ -77,6 +77,67 @@ internal object Posters {
     }
 
     /**
+     * Longest edge, in pixels, of a balloon board.
+     *
+     * A balloon is 250 dp tall and about 60% of the screen wide, which on a 3× phone is roughly
+     * 740 × 750 px — 2.2 MB in `ARGB_8888` for a single received game, and a conversation can show
+     * several at once. 512 px is a little under the slot on such a phone, so the host scales the
+     * board up slightly, and costs about a fifth as much. Boards are photographs of a game in
+     * progress rather than text, so the softness does not read.
+     */
+    const val MaxBoardEdgePx = 512
+
+    /**
+     * Rasterise [drawable] to fill exactly [widthPx] × [heightPx], cropping rather than squashing.
+     *
+     * Distinct from [rasterise], which fits a drawable *inside* a cap and keeps whatever shape it
+     * has. A balloon board has a shape dictated by the balloon, and the source art rarely matches
+     * it: fitting would letterbox, and stretching to the box would distort a pool table. So the
+     * drawable is scaled to *cover* the box and the overflow is drawn off the edges — the same
+     * thing `ContentScale.Crop` does in their renderer, and what `centerCrop` would do if the
+     * ImageView were given the full-size bitmap instead.
+     *
+     * Both dimensions are scaled down together if either exceeds [maxEdgePx], so the returned
+     * bitmap keeps the requested *aspect* even when it does not keep the requested size. The
+     * ImageView is `match_parent` in width and `adjustViewBounds` in height, so the aspect is what
+     * decides the on-screen geometry; the absolute size only decides sharpness and memory.
+     *
+     * `null` for a drawable with no intrinsic size, for the same reason [rasterise] returns null.
+     */
+    fun fill(
+        drawable: Drawable,
+        widthPx: Int,
+        heightPx: Int,
+        maxEdgePx: Int = MaxBoardEdgePx,
+    ): Bitmap? {
+        val srcWidth = drawable.intrinsicWidth
+        val srcHeight = drawable.intrinsicHeight
+        if (srcWidth <= 0 || srcHeight <= 0) return null
+        if (widthPx <= 0 || heightPx <= 0) return null
+
+        val budget = minOf(1f, maxEdgePx.toFloat() / maxOf(widthPx, heightPx).toFloat())
+        val outWidth = (widthPx * budget).toInt().coerceAtLeast(1)
+        val outHeight = (heightPx * budget).toInt().coerceAtLeast(1)
+
+        val bitmap = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        // Cover, not fit: the larger of the two ratios, so neither axis is left short.
+        val cover = maxOf(
+            outWidth.toFloat() / srcWidth.toFloat(),
+            outHeight.toFloat() / srcHeight.toFloat(),
+        )
+        val drawWidth = (srcWidth * cover).toInt().coerceAtLeast(1)
+        val drawHeight = (srcHeight * cover).toInt().coerceAtLeast(1)
+        val left = (outWidth - drawWidth) / 2
+        val top = (outHeight - drawHeight) / 2
+
+        drawable.setBounds(left, top, left + drawWidth, top + drawHeight)
+        drawable.draw(canvas)
+        return bitmap
+    }
+
+    /**
      * Heap bytes this bitmap occupies, for the page-budget log.
      *
      * Deliberately *not* "bytes it costs to send". A bitmap above a few KB is written to ashmem and

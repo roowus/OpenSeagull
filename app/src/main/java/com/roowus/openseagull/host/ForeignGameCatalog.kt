@@ -1,6 +1,7 @@
 package com.roowus.openseagull.host
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.drawable.Drawable
 import android.os.Parcelable
 import com.bluebubbles.messaging.MadridMessage
@@ -209,6 +210,103 @@ class ForeignGame internal constructor(
      * `messageGuid`) is asserted in `SendGameProbe`, where a failure is a test result rather than a
      * silently blank balloon in a user's conversation.
      */
+    /**
+     * The poster this game wants for *this* board, rather than its generic one.
+     *
+     * Same reflective shape as [poster]; the only difference is the argument. Their
+     * `gamePoster(config: Map<String, String>?)` declares the parameter nullable, which is what
+     * makes both calls legitimate — [poster] asks "what represents this game", this asks "what
+     * represents this position". Several games branch on the board (8 Ball vs 9 Ball art), so
+     * passing the real map is what makes a received balloon look like the game it is.
+     */
+    fun posterFor(message: Map<String, String>): Drawable? {
+        val id = klass.invokeOrNull(
+            instance,
+            "gamePoster",
+            arrayOf(Map::class.java),
+            arrayOf<Any?>(message),
+        ) as? Int
+        return id?.let { pigeon.drawable(it) }
+    }
+
+    /**
+     * The small grey line under the subtitle, delegated to their code.
+     *
+     * Delegated rather than reimplemented — unlike [displaySubtitle] and [winStateImage] below —
+     * because their `getDisplaySubcaption` is pure: it trims `message["subcaption"]` and returns
+     * null if empty. It takes a Context and never uses it, so there is no identity to get wrong.
+     */
+    fun displaySubcaption(message: Map<String, String>): String? = klass.invokeOrNull(
+        instance,
+        "getDisplaySubcaption",
+        arrayOf(Context::class.java, Map::class.java),
+        arrayOf(appContext, message),
+    ) as? String
+
+    /**
+     * A rendered picture of the board, for the games that can draw one.
+     *
+     * Only some of their games implement `DynamicPreviewGame`; the rest have no live art and the
+     * caller falls back to [posterFor]. `null` here therefore means "this game does not do this",
+     * not "something went wrong", which is why absence is not logged.
+     *
+     * Two shapes exist, and both must be tried. Their interface declares a 4-arg overload with a
+     * **default body** delegating to the 2-arg one, so whether `getMethod` finds the 4-arg on a
+     * given implementing class depends on whether that class overrode it. Asking for the 4-arg
+     * first gets a correctly-sized bitmap from the games that size their own; the fallback gets an
+     * unsized one from the games that do not, which the caller scales.
+     *
+     * The primitive types are load-bearing: their parameters are `int`, so `Int::class.java`
+     * (which is `java.lang.Integer`) would fail to match and this would silently report the method
+     * as absent. See [invokeOrNull]'s KDoc — this is the exact case it warns about.
+     */
+    fun previewBitmap(message: Map<String, String>, widthPx: Int, heightPx: Int): Bitmap? {
+        klass.invokeOrNull(
+            instance,
+            "gamePreviewBitmap",
+            arrayOf(
+                Context::class.java,
+                Map::class.java,
+                Int::class.javaPrimitiveType!!,
+                Int::class.javaPrimitiveType!!,
+            ),
+            arrayOf(appContext, message, widthPx, heightPx),
+        )?.let { return it as? Bitmap }
+
+        return klass.invokeOrNull(
+            instance,
+            "gamePreviewBitmap",
+            arrayOf(Context::class.java, Map::class.java),
+            arrayOf(appContext, message),
+        ) as? Bitmap
+    }
+
+    /**
+     * The turn line under the board — "Your Move.", "You Won!", and so on.
+     *
+     * Computed by [BoardVerdict] rather than by their `getDisplaySubtitle`, and that KDoc carries
+     * the whole argument: theirs derives `myId` from their own prefs file, which our uid cannot
+     * read, so it answers with a fresh random UUID on every call. The rules are theirs; the
+     * identity is [SeagullIdentity]'s.
+     *
+     * `null` means "nothing to say" and the caller should fall back to the balloon's `caption`,
+     * which is what their own renderer does.
+     */
+    fun displaySubtitle(message: Map<String, String>): String? =
+        BoardVerdict.subtitle(message, SeagullIdentity.senderUuid())
+
+    /**
+     * The win-state glyph drawn over the board, or `null` while the game is still running.
+     *
+     * [BoardVerdict] names the glyph; [InstalledOpenPigeon.drawableByName] finds it. By name and
+     * not by id because a reimplementation has no access to their `R` — those constants live in
+     * their compiled R class, and their numeric values mean nothing to our resource table. The
+     * four drawables themselves are theirs and stay theirs; we only ask for one.
+     */
+    fun winStateImage(message: Map<String, String>): Drawable? =
+        BoardVerdict.glyph(message, SeagullIdentity.senderUuid())
+            ?.let { pigeon.drawableByName(it) }
+
     fun buildMessage(data: Map<*, *>, session: String?): MadridMessage? {
         val theirs = klass.invokeOrNull(
             instance,

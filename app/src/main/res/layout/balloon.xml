@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Inflated inside OpenBubbles' process via RemoteViews, so only the RemoteViews-supported
+     widget set may be used here. No custom views, no Compose.
+
+     FrameLayout for the board, not LinearLayout: the win-state glyph (crown / cross / draw) is
+     drawn *over* the board rather than beside it, and a LinearLayout has no way to express that.
+     FrameLayout is on the RemoteViews-supported list; a ConstraintLayout is not.
+
+     The board's height is not fixed here, because it depends on whether the payload carries a
+     subcaption — OpenPigeon reserves 58dp of caption area when it does and 46dp when it does not,
+     and the board takes whatever is left of the 250dp balloon.
+
+     It is carried by the *bitmap* rather than by setViewLayoutHeight, which needs API 31 against
+     our minSdk of 26. So balloon_board is wrap_content with adjustViewBounds, and getLiveView
+     hands it a bitmap already scaled to the computed pixel size; the ImageView then reports that
+     size as its own and the FrameLayout wraps it. Nothing about this is a workaround for a
+     rendering problem — it is simply where the number is allowed to live. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/balloon_root"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <FrameLayout
+        android:id="@+id/balloon_board_frame"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <ImageView
+            android:id="@+id/balloon_board"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:adjustViewBounds="true"
+            android:scaleType="centerCrop"
+            android:contentDescription="@null" />
+
+        <!-- Starts GONE; only shown when their getWinStateImage returns an id. The 32dp inset is
+             theirs — the glyph is meant to float inside the board, not cover it. -->
+        <ImageView
+            android:id="@+id/balloon_win"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:padding="32dp"
+            android:visibility="gone"
+            android:scaleType="centerCrop"
+            android:contentDescription="@null" />
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/balloon_subtitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:textColor="#808080" />
+
+    <TextView
+        android:id="@+id/balloon_subcaption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="#808080"
+        android:visibility="gone" />
+
+</LinearLayout>

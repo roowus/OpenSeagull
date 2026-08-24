@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.RemoteException
 import android.util.Log
+import android.view.View
 import android.widget.RemoteViews
 import androidx.core.net.toUri
 import com.bluebubbles.messaging.IKeyboardHandle
@@ -20,8 +21,10 @@ import com.roowus.openseagull.host.ForeignPayload
 import com.roowus.openseagull.host.InstalledOpenPigeon
 import com.roowus.openseagull.host.SessionRegistry
 import com.roowus.openseagull.ui.GamePicker
+import com.roowus.openseagull.ui.Posters
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.roundToInt
 
 /**
  * OpenSeagull's implementation of the OpenBubbles extension contract.
@@ -32,10 +35,11 @@ import java.util.concurrent.Executors
  * OpenPigeon, drawn with their own poster art, and tapping a game **sends** it — which is what a
  * picker tap does in OpenPigeon too, rather than opening a board (see [launchGame]).
  *
- * Tapping a received balloon opens it — [didTapTemplate] decodes the payload, registers the session
- * so their game can read it, and launches their Activity in *our* process. What is still missing is
- * the balloon's own artwork: [getLiveView] returns the status view rather than a rendered board, so
- * a received game reads as a line of text until it is tapped.
+ * A received balloon is drawn as a board with the same geometry OpenPigeon uses ([getLiveView]), and
+ * tapping it opens the game — [didTapTemplate] decodes the payload, registers the session so their
+ * game can read it, and launches their Activity in *our* process. What is still missing is the way
+ * back: a move made in a game is held in [SessionRegistry] and never written to the balloon, because
+ * `IMessageViewHandle.updateMessage` is unwired.
  *
  * Methods that cannot yet do their job return a status view rather than a stub or an exception, so
  * a bind from OpenBubbles always produces something legible on screen. Where a method is
@@ -347,38 +351,69 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
      * place — decode, `isSupported`, `gameClass` and the catalog's own initialiser can all raise it,
      * and a `try` per call site would say the same thing five times.
      */
+    /**
+     * What a balloon turns out to be: the installed game, its decoded board, and the name to call
+     * it by.
+     *
+     * [name] is not `board["game"]`. The wire name and the game's own name are not always equal —
+     * an 8 Ball+ balloon says `pool3` while the game answering to it reports `pool` — and their
+     * code passes the *game's* name as the `GAME` extra. Resolving it once here means the extra and
+     * the session id can never disagree, and [getLiveView] and [openBalloon] cannot drift apart on
+     * which one they used.
+     */
+    private data class Balloon(
+        val game: ForeignGame,
+        val board: Map<String, String>,
+        val name: String,
+    )
+
+    /**
+     * Decode [message] and find the installed game that owns it, or `null` with a reason logged.
+     *
+     * Shared by [openBalloon] and [getLiveView] because a tap and a render must agree about what a
+     * balloon *is*. Two copies of this prefix would be two chances to resolve the same payload to
+     * different games — a board drawn from one game's art and opened into another's activity.
+     *
+     * Raises [ForeignCallException] rather than swallowing it: `decode`, the catalog initialiser
+     * and `byName` all run their code, and both callers already have a handler that says which
+     * caller was in flight. Only the "we could not read it" cases are `null` here, and each logs
+     * what it could not read.
+     */
+    private fun readBalloon(
+        p: InstalledOpenPigeon,
+        message: MadridMessage,
+        sessionId: String,
+    ): Balloon? {
+        // decode() logs which of its four ways it failed, so there is nothing to add here.
+        val board = ForeignPayload.decode(p, message.url) ?: return null
+
+        val wanted = board["game"] ?: run {
+            Log.w(TAG, "decoded board names no game — ignoring ${sessionId.take(8)}…")
+            return null
+        }
+        val game = ForeignGameCatalog.of(p).byName(wanted) ?: run {
+            Log.w(TAG, "no installed game answers to '$wanted'")
+            return null
+        }
+        return Balloon(game, board, game.name ?: wanted)
+    }
+
     private fun openBalloon(sessionId: String, message: MadridMessage) {
         val p = pigeon ?: run {
             Log.w(TAG, "balloon tap but OpenPigeon is gone — cannot open ${sessionId.take(8)}…")
             return
         }
-        // decode() logs which of its four ways it failed, so there is nothing to add here.
-        val board = ForeignPayload.decode(p, message.url) ?: return
-
-        val wanted = board["game"] ?: run {
-            Log.w(TAG, "decoded board names no game — refusing to open ${sessionId.take(8)}…")
-            return
-        }
-        val game = ForeignGameCatalog.of(p).byName(wanted) ?: run {
-            Log.w(TAG, "no installed game answers to '$wanted' — refusing to open")
-            return
-        }
+        val (game, board, name) = readBalloon(p, message, sessionId) ?: return
         if (!game.isSupported(board)) {
             // Their own default is `true`; a game that overrides it to refuse is telling us the
             // payload was written by a protocol version the installed code does not understand.
-            Log.i(TAG, "'$wanted' refuses this payload as unsupported — not opening")
+            Log.i(TAG, "'$name' refuses this payload as unsupported — not opening")
             return
         }
         val target = game.gameClass() ?: run {
-            Log.w(TAG, "'$wanted' reports no gameClass — nothing to launch")
+            Log.w(TAG, "'$name' reports no gameClass — nothing to launch")
             return
         }
-
-        // The wire name and the game's own name are not always equal: an 8 Ball+ balloon says
-        // `pool3` while the game answering to it reports `pool`. Their code passes the *game's*
-        // name as the GAME extra, so the resolved name is what goes on both the extra and the
-        // session — one value, computed once, so the two can never disagree.
-        val name = game.name ?: wanted
 
         SessionRegistry.open(sessionId, name, board)
 
@@ -408,12 +443,122 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         }
     }
 
+    /**
+     * Draw a received game as a balloon: the board, the win glyph over it, and the two grey lines.
+     *
+     * ## Why the geometry is computed here rather than left to the layout
+     *
+     * The host gives a live view a slot roughly 60% of the screen wide and 250 dp tall, and their
+     * renderer divides that itself: 58 dp of caption area when the payload carries a subcaption and
+     * 46 dp when it does not, with the board taking whatever is left. Those numbers are theirs, and
+     * a balloon that used different ones would sit visibly wrong next to a real GamePigeon balloon
+     * in the same conversation.
+     *
+     * The board's height reaches the layout through the *bitmap*, not through a setter:
+     * `RemoteViews.setViewLayoutHeight` is API 31 and this app runs from 26. So `balloon_board` is
+     * `wrap_content` with `adjustViewBounds`, and it is handed a bitmap already at the computed
+     * aspect — see the comment at the top of `balloon.xml`.
+     *
+     * ## Why nothing here is clickable
+     *
+     * Their `RenderLiveExtension` wraps the whole column in `actionStartActivity`, because Glance
+     * composes the balloon and a tap on a composed tree has to carry its own `PendingIntent`. We do
+     * not need one: the host calls [didTapTemplate] when a balloon is tapped, which is already
+     * wired and already opens the game. Attaching a second path would risk opening it twice.
+     *
+     * ## Failure is a status view, not an exception
+     *
+     * This runs on a binder thread inside OpenBubbles' call. Throwing would surface in *their*
+     * process as a dead balloon with our name on it, so every foreign call is guarded and any miss
+     * falls back to [statusView] — legible, and it says what went wrong.
+     */
     override fun getLiveView(
         callback: IViewUpdateCallback?,
         message: MadridMessage?,
         handle: IMessageViewHandle?,
         userCount: Int,
-    ): RemoteViews = statusView()
+    ): RemoteViews {
+        this.userCount = userCount
+        if (message == null) return statusView()
+        val p = pigeon ?: return statusView()
+
+        val sessionId = message.session.orEmpty()
+        val balloon = try {
+            readBalloon(p, message, sessionId)
+        } catch (e: ForeignCallException) {
+            Log.w(TAG, "OpenPigeon threw rendering ${sessionId.take(8)}…", e)
+            null
+        } ?: return statusView()
+
+        return try {
+            balloonView(balloon, message)
+        } catch (e: ForeignCallException) {
+            Log.w(TAG, "OpenPigeon threw drawing '${balloon.name}'", e)
+            statusView()
+        } catch (e: RuntimeException) {
+            // One bad drawable should cost one balloon its art, not throw inside their process.
+            // Same reasoning as GamePicker.addCell's guard around a foreign poster.
+            Log.w(TAG, "failed to draw '${balloon.name}'", e)
+            statusView()
+        }
+    }
+
+    /** [getLiveView]'s body once the payload has been read; separated so its guard stays one block. */
+    private fun balloonView(balloon: Balloon, message: MadridMessage): RemoteViews {
+        val (game, board, name) = balloon
+        val views = RemoteViews(context.packageName, R.layout.balloon)
+
+        val metrics = context.resources.displayMetrics
+        val density = metrics.density
+        val dpWidth = metrics.widthPixels / density
+        // Their arithmetic, kept verbatim: 60% of the screen, less 10 dp of balloon chrome.
+        val widthDp = ((dpWidth * 0.60f).roundToInt() - 10).coerceAtLeast(1)
+        val heightDp = BalloonHeightDp
+
+        val subcaption = game.displaySubcaption(board)
+        val captionAreaDp = if (subcaption != null) CaptionAreaWithSubcaptionDp else CaptionAreaDp
+        val boardHeightDp = (heightDp - captionAreaDp).coerceAtLeast(1)
+
+        val boardWidthPx = (widthDp * density).roundToInt().coerceAtLeast(1)
+        val boardHeightPx = (boardHeightDp * density).roundToInt().coerceAtLeast(1)
+
+        // A game that can draw its own board draws it; the rest show their poster, cropped to the
+        // same box. Their renderer makes exactly this choice, and for the same reason: a poster is
+        // what a game looks like, a preview is what *this* game looks like right now.
+        val boardBitmap = game.previewBitmap(board, boardWidthPx, boardHeightPx)
+            ?: game.posterFor(board)?.let { Posters.fill(it, boardWidthPx, boardHeightPx) }
+        if (boardBitmap != null) {
+            views.setImageViewBitmap(R.id.balloon_board, boardBitmap)
+        }
+
+        // Their glyph is drawn over the board at the same size with a 32dp inset, which the layout
+        // already carries; here it only needs to be the same shape as the board it covers.
+        game.winStateImage(board)
+            ?.let { Posters.fill(it, boardWidthPx, boardHeightPx) }
+            ?.let {
+                views.setImageViewBitmap(R.id.balloon_win, it)
+                views.setViewVisibility(R.id.balloon_win, View.VISIBLE)
+            }
+
+        // `caption` last, as theirs does: the turn line is the better answer when there is one, and
+        // "Game Name" is the placeholder their own renderer falls back to.
+        val subtitle = game.displaySubtitle(board) ?: message.caption ?: "Game Name"
+        views.setTextViewText(R.id.balloon_subtitle, subtitle.uppercase())
+
+        if (subcaption != null) {
+            views.setTextViewText(R.id.balloon_subcaption, subcaption.uppercase())
+            views.setViewVisibility(R.id.balloon_subcaption, View.VISIBLE)
+        }
+
+        Log.i(
+            TAG,
+            "balloon '$name' session=${message.session.orEmpty().take(8)}… " +
+                "board=${boardWidthPx}×$boardHeightPx " +
+                "art=${if (boardBitmap != null) "yes" else "none"} " +
+                "sub=${if (subcaption != null) "yes" else "no"}",
+        )
+        return views
+    }
 
     /**
      * The other side sent a new turn on a conversation we already have open.
@@ -500,5 +645,17 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
 
         /** Delay before the second `updateView`, matching OpenPigeon's workaround. */
         const val RedrawSettleMs = 50L
+
+        /**
+         * Height of a balloon, in dp, and how much of it the two caption lines take.
+         *
+         * All three are OpenPigeon's, read from their `getLiveView` and `RenderLiveExtension`. They
+         * are not free parameters: our balloons sit in the same conversation as balloons drawn by
+         * real GamePigeon on iOS, and a board a few dp taller than theirs reads as a bug rather
+         * than as a choice.
+         */
+        const val BalloonHeightDp = 250
+        const val CaptionAreaDp = 46
+        const val CaptionAreaWithSubcaptionDp = 58
     }
 }
