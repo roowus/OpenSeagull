@@ -1,6 +1,7 @@
 package com.roowus.openseagull.host
 
 import android.util.Log
+import com.bluebubbles.messaging.IMessageViewHandle
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -28,10 +29,13 @@ import java.util.concurrent.ConcurrentHashMap
  * ## What is deliberately not done yet
  *
  * [update] merges into memory and notifies, but does **not** persist the result back to the
- * conversation. That is *write-back*, and it needs three things this object does not have: their
- * `Cryption.encrypt`, the `IMessageViewHandle` the tap arrived on, and a thread that is not the
- * main one — `updateMessage` is not `oneway` in the AIDL, so it blocks until the host has taken the
- * message.
+ * conversation. That is *write-back*, and it needed three things: the `IMessageViewHandle` the host
+ * addressed this balloon with, their `Cryption.encrypt` to build the outbound payload, and a thread
+ * that is not the main one — `updateMessage` is not `oneway` in the AIDL, so it blocks until the
+ * host has taken the message.
+ *
+ * The first of those is now here ([Session.handle], set through [attachHandle]). The other two are
+ * not, so nothing calls `updateMessage` and [update] still ends in memory.
  *
  * Reading the other direction is built: [open] is called from `MadridExtension.didTapTemplate` when
  * a balloon is tapped and again from `messageUpdated` when the other player moves, so a hosted game
@@ -91,6 +95,25 @@ object SessionRegistry {
          */
         @Volatile
         internal var listener: Any? = null
+
+        /**
+         * The host's way back to this balloon, or `null` if we have not been handed one.
+         *
+         * Typed, unlike [listener]: `IMessageViewHandle` is generated from *our* AIDL and loaded by
+         * our own ClassLoader, so it is an ordinary reference here. It is the opposite direction —
+         * OpenBubbles gave it to us, rather than OpenPigeon's code passing us one of theirs.
+         *
+         * Nullable and mutable because the host does not promise one. It arrives with a tap
+         * (`MadridExtension.didTapTemplate`) or with a render (`MadridExtension.getLiveView`),
+         * whichever happens first, and OpenBubbles hands out a *fresh* handle on a rebind — theirs
+         * has an `updateHandle` for exactly that, and dropping the new one would leave write-back
+         * addressed to a balloon the host has already forgotten.
+         *
+         * Held rather than used: nothing calls `updateMessage` yet. This is the piece that was
+         * missing, not the write-back itself.
+         */
+        @Volatile
+        internal var handle: IMessageViewHandle? = null
     }
 
     private val sessions = ConcurrentHashMap<String, Session>()
@@ -105,13 +128,37 @@ object SessionRegistry {
     fun open(id: String, game: String, message: Map<String, String>): Session {
         val session = Session(id, game)
         session.message = message
+        // The *payload* is replaced; the handle is carried across. A handle is not part of the
+        // balloon's state — it is the host's address for this balloon, and it stays valid until
+        // OpenBubbles issues a new one. Two ordinary sequences would otherwise lose it: a render
+        // hands us a handle before the tap that opens the session, and `messageUpdated` re-opens a
+        // session that is already open every time the opponent moves — which would strip the handle
+        // from a game in progress, at exactly the moment write-back is about to need it.
+        session.handle = sessions[id]?.handle
         sessions[id] = session
         Log.i(
             TAG,
             "session opened id=${id.take(8)}… game=$game keys=${message.size} " +
-                "as=${session.senderUuid.take(8).ifEmpty { "<none>" }}…",
+                "as=${session.senderUuid.take(8).ifEmpty { "<none>" }}… " +
+                "handle=${if (session.handle != null) "kept" else "none"}",
         )
         return session
+    }
+
+    /**
+     * Record the host's way back to this balloon, replacing any previous one.
+     *
+     * Their `getSessionFor` calls `updateHandle(handle)` on every render of a session it already
+     * knows, so a fresh handle always wins — this does the same. Silently does nothing for a
+     * session we have not opened: the host renders balloons we have never been tapped into, and
+     * that is not an error, just a handle with nowhere to go yet.
+     */
+    fun attachHandle(id: String, handle: IMessageViewHandle?) {
+        if (handle == null) return
+        val session = sessions[id] ?: return
+        val replacing = session.handle != null && session.handle !== handle
+        session.handle = handle
+        if (replacing) Log.i(TAG, "handle replaced id=${id.take(8)}…")
     }
 
     fun find(id: String): Session? = sessions[id]

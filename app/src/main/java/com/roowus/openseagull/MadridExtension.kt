@@ -336,7 +336,7 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
             return
         }
         try {
-            openBalloon(sessionId, message)
+            openBalloon(sessionId, message, handle)
         } catch (e: ForeignCallException) {
             // Their decrypt or their game object threw on a payload we handed it. Distinct from
             // "we could not read it", which decode() reports as null and logs on its own terms.
@@ -344,13 +344,6 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         }
     }
 
-    /**
-     * The body of [didTapTemplate], minus the argument guards.
-     *
-     * Split out so the single `catch (ForeignCallException)` above covers every foreign call in one
-     * place — decode, `isSupported`, `gameClass` and the catalog's own initialiser can all raise it,
-     * and a `try` per call site would say the same thing five times.
-     */
     /**
      * What a balloon turns out to be: the installed game, its decoded board, and the name to call
      * it by.
@@ -398,7 +391,22 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         return Balloon(game, board, game.name ?: wanted)
     }
 
-    private fun openBalloon(sessionId: String, message: MadridMessage) {
+    /**
+     * The body of [didTapTemplate], minus the argument guards.
+     *
+     * Split out so the single `catch (ForeignCallException)` above covers every foreign call in one
+     * place — decode, `isSupported`, `gameClass` and the catalog's own initialiser can all raise it,
+     * and a `try` per call site would say the same thing five times.
+     *
+     * [handle] is stored, not used. It is the host's address for this balloon, and it is what
+     * write-back will need; taking it here is why a tap is the moment a session becomes writable.
+     * See [SessionRegistry.Session.handle].
+     */
+    private fun openBalloon(
+        sessionId: String,
+        message: MadridMessage,
+        handle: IMessageViewHandle,
+    ) {
         val p = pigeon ?: run {
             Log.w(TAG, "balloon tap but OpenPigeon is gone — cannot open ${sessionId.take(8)}…")
             return
@@ -416,6 +424,9 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         }
 
         SessionRegistry.open(sessionId, name, board)
+        // After open, not before: open replaces the entry, and this handle is the newest one the
+        // host has given us for this balloon — newer than whatever a previous render left behind.
+        SessionRegistry.attachHandle(sessionId, handle)
 
         val intent = Intent(context, target).apply {
             putExtra("SESSION", sessionId)
@@ -483,6 +494,13 @@ class MadridExtension(val context: Context) : IMadridExtension.Stub() {
         val p = pigeon ?: return statusView()
 
         val sessionId = message.session.orEmpty()
+        // Before the render, and unconditionally: a render is the other occasion the host hands out
+        // a handle, and OpenBubbles issues a *fresh* one on rebind. Theirs takes it in the same
+        // place — `getSessionFor` calls `updateHandle` on every render of a session it knows. This
+        // is a no-op until a tap has opened the session, which is the ordinary case: the balloon is
+        // drawn long before anyone touches it.
+        SessionRegistry.attachHandle(sessionId, handle)
+
         val balloon = try {
             readBalloon(p, message, sessionId)
         } catch (e: ForeignCallException) {
