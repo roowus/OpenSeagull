@@ -4,6 +4,7 @@ import android.os.Binder
 import android.os.Bundle
 import android.os.IBinder
 import android.os.IInterface
+import android.os.Parcel
 import android.util.Log
 import java.lang.reflect.Proxy
 
@@ -33,12 +34,17 @@ import java.lang.reflect.Proxy
  * ## Why no marshalling happens
  *
  * `IGameSession.Stub.asInterface(binder)` first asks `binder.queryLocalInterface(DESCRIPTOR)`, and
- * returns whatever comes back if it is an `IGameSession`. [binder] is a plain [Binder] with our
- * proxy attached under their descriptor, so their `asInterface` takes that branch and calls our
- * proxy **directly** — same process, same thread, no Parcel, no transaction. That matters for two
- * reasons beyond speed: their `IGameSession` methods are none of them `oneway`, so their code is
- * written expecting a blocking call and gets one; and an exception thrown here would surface inside
- * their activity rather than as a `RemoteException`, which is why nothing below is allowed to throw.
+ * returns whatever comes back **if it is an `IGameSession`**. [binder] is a [Binder] with our proxy
+ * attached under their descriptor, so their `asInterface` takes that branch and calls our proxy
+ * **directly** — same process, same thread, no Parcel, no transaction. That matters for two reasons
+ * beyond speed: their `IGameSession` methods are none of them `oneway`, so their code is written
+ * expecting a blocking call and gets one; and an exception thrown here would surface inside their
+ * activity rather than as a `RemoteException`, which is why nothing below is allowed to throw.
+ *
+ * Both halves of that `if` are load-bearing, and the second one is easy to miss. A descriptor match
+ * gets our proxy handed back; only an `instanceof` against **their caller's own** `IGameSession`
+ * keeps it. Two loaders define two such classes, so which loader builds the proxy decides whether
+ * any of this works — see `loaderFor`, and [binder] for the crash that taught it.
  *
  * ## Fail-soft is deliberate, and it is theirs
  *
@@ -60,9 +66,50 @@ class SessionChannel private constructor(
      * owner and descriptor and hands the owner back on an exact descriptor match. The proxy
      * qualifies as the owner because every AIDL interface extends [IInterface], which comes from
      * the boot ClassLoader and is therefore the same type in both apps.
+     *
+     * ## Why [onTransact] is overridden when nothing is supposed to reach it
+     *
+     * Their `asInterface` guards the local branch with **two** conditions, not one:
+     *
+     * ```java
+     * IInterface iin = obj.queryLocalInterface(DESCRIPTOR);
+     * if (iin != null && iin instanceof IGameSession) return (IGameSession) iin;
+     * return new IGameSession.Stub.Proxy(obj);
+     * ```
+     *
+     * A descriptor match alone is not enough — the object handed back must also *be* an
+     * `IGameSession` **by the caller's own loader**. Get that wrong and the `instanceof` quietly
+     * fails, their side builds a real `Stub.Proxy`, and every call marshals into a plain [Binder]
+     * whose base `onTransact` returns `false` without writing a reply. Their `getSenderUUID` then
+     * reads a String off an empty Parcel, gets `null`, and their Kotlin non-null return type turns
+     * it into `NullPointerException: getSenderUUID(...) must not be null` — from a stack that names
+     * only their files. That is the exact crash this class was measured producing, and the reason it
+     * took a while to find is that **nothing here logged anything**: [dispatch] was never on the
+     * path.
+     *
+     * So the fallback is made loud. [loaderFor] is what stops it happening; this is what makes it
+     * legible if it happens anyway.
      */
-    val binder: IBinder = Binder()
+    val binder: IBinder = object : Binder() {
+        override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+            Log.e(
+                TAG,
+                "their code marshalled transaction $code instead of calling us directly — " +
+                    "asInterface took the Proxy branch, so queryLocalInterface returned an object " +
+                    "their loader does not accept as $descriptor. Answering nothing, which their " +
+                    "non-null return types will surface as a NullPointerException in their file",
+            )
+            return super.onTransact(code, data, reply, flags)
+        }
+    }
 
+    /**
+     * The object their `asInterface` hands to their own code.
+     *
+     * Built over `iface.classLoader` — [iface] having been resolved through the loader their
+     * *hosted* code runs on, not through their package Context. See [loaderFor]; the difference is
+     * what the `instanceof` in their `asInterface` is measuring.
+     */
     private val session: Any = Proxy.newProxyInstance(
         iface.classLoader,
         arrayOf(iface),
@@ -250,7 +297,14 @@ class SessionChannel private constructor(
          * it was addressed, which fails soft the way it does today rather than crashing.
          */
         fun of(pigeon: InstalledOpenPigeon): SessionChannel? {
-            val iface = pigeon.loadClassOrNull(IGameSession) ?: run {
+            val loader = loaderFor(pigeon)
+            val iface = try {
+                loader.loadClass(IGameSession)
+            } catch (_: ClassNotFoundException) {
+                null
+            } catch (_: LinkageError) {
+                null
+            } ?: run {
                 Log.w(TAG, "$IGameSession is absent — cannot answer the session channel")
                 return null
             }
@@ -260,9 +314,11 @@ class SessionChannel private constructor(
             }
             // Read the descriptor off their Stub rather than assuming it equals the class name.
             // It does in every AIDL build, but `asInterface` compares it as an exact string and a
-            // mismatch would send their call down the marshalling path against a Binder with no
-            // onTransact — which answers, silently, with nothing.
-            val descriptor = descriptorOf(pigeon) ?: IGameSession
+            // mismatch would send their call down the marshalling path against a Binder whose
+            // onTransact answers nothing. Read through the same loader as the interface: the string
+            // is identical either way, but loading one class from each loader is the kind of split
+            // that produced this file's last bug.
+            val descriptor = descriptorOf(loader) ?: IGameSession
             return try {
                 SessionChannel(descriptor, iface)
             } catch (t: Throwable) {
@@ -271,11 +327,42 @@ class SessionChannel private constructor(
             }
         }
 
-        private fun descriptorOf(pigeon: InstalledOpenPigeon): String? = try {
-            pigeon.loadClassOrNull("$IGameSession\$Stub")
-                ?.getDeclaredField("DESCRIPTOR")
-                ?.apply { isAccessible = true }
-                ?.get(null) as? String
+        /**
+         * The loader whose `IGameSession` is the one their calling code will type-check against.
+         *
+         * **Ours**, not [InstalledOpenPigeon]'s — and that distinction is the whole bug this
+         * function exists to avoid.
+         *
+         * A `Class` is identified by name *and* defining loader. After [ForeignCode.installDex],
+         * their dex is on our ClassLoader, so a hosted `GameSessionIPC` resolves `IGameSession`
+         * through **our** loader. `InstalledOpenPigeon.classLoader` comes from
+         * `createPackageContext(INCLUDE_CODE)` and is a different loader entirely, so it defines a
+         * *second*, unrelated `IGameSession`. Both have the same descriptor string, so
+         * `queryLocalInterface` matches either way — and then their
+         * `iin instanceof IGameSession` rejects the wrong one, silently, and every call marshals
+         * into a binder that answers nothing. See [binder] for what that looked like on-device.
+         *
+         * So: prefer our own loader, and fall back to theirs only if their dex is not on ours.
+         * The fallback is not expected to fire — [SeagullApplication] runs [ForeignCode.installDex]
+         * before any bind can happen — but it is the difference between a degraded channel and no
+         * channel at all if injection ever fails.
+         */
+        private fun loaderFor(pigeon: InstalledOpenPigeon): ClassLoader {
+            val ours = SessionChannel::class.java.classLoader
+            if (ours != null && runCatching { ours.loadClass(IGameSession) }.isSuccess) return ours
+            Log.w(
+                TAG,
+                "$IGameSession is not on our loader — their dex was not injected, so the session " +
+                    "proxy is built on their loader and their asInterface may refuse it",
+            )
+            return pigeon.classLoader
+        }
+
+        private fun descriptorOf(loader: ClassLoader): String? = try {
+            loader.loadClass("$IGameSession\$Stub")
+                .getDeclaredField("DESCRIPTOR")
+                .apply { isAccessible = true }
+                .get(null) as? String
         } catch (_: Throwable) {
             null
         }
