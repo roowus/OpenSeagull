@@ -1,5 +1,6 @@
 package com.roowus.openseagull.host
 
+import android.os.RemoteException
 import android.util.Log
 import com.bluebubbles.messaging.IMessageViewHandle
 import java.util.concurrent.ConcurrentHashMap
@@ -43,10 +44,7 @@ import java.util.concurrent.ConcurrentHashMap
  * when a balloon is tapped and again from `messageUpdated` when the other player moves, so a hosted
  * game reads a real board.
  *
- * ## What is still deliberately not done
- *
- * [lock] and [unlock] count depth and stop there. Theirs call through to `handle.lock()` /
- * `handle.unlock()` under a monitor, so a hosted game currently locks nothing in the host.
+ * [lock] and [unlock] reach the host too, on the edges of the depth counter.
  */
 object SessionRegistry {
 
@@ -188,12 +186,51 @@ object SessionRegistry {
         sessions[id]?.suppressed = suppress
     }
 
+    /**
+     * Hold the conversation still while a game is open, as their `GameSession.lock` does.
+     *
+     * Their `lock()` sets a flag and calls `handle.lock()`; ours counts instead of flagging, for
+     * the reason in [Session.lockDepth], and only reaches the host on the transition into depth 1.
+     * The host is not told twice, because `unlock` is not called twice either — the counter exists
+     * so that a re-entrant open does not leave the conversation locked after the game closes.
+     *
+     * Called inline on their thread, and **not** because it is cheap: `lock()` is no more `oneway`
+     * in `IMessageViewHandle.aidl` than `updateMessage` is, so it blocks until the host answers.
+     * It is inline because theirs is — their `lock()` calls `handle.lock()` directly under
+     * `synchronized(this)` — and because the ordering is the point: the conversation must be still
+     * *before* the game draws, where a move only has to be sent *eventually*. That is the whole
+     * difference between this and [SessionWriter].
+     */
     fun lock(id: String) {
-        sessions[id]?.let { it.lockDepth++ }
+        val session = sessions[id] ?: return
+        synchronized(session) {
+            if (session.lockDepth++ == 0) session.handle?.callQuietly("lock") { it.lock() }
+        }
     }
 
     fun unlock(id: String) {
-        sessions[id]?.let { if (it.lockDepth > 0) it.lockDepth-- }
+        val session = sessions[id] ?: return
+        synchronized(session) {
+            if (session.lockDepth > 0 && --session.lockDepth == 0) {
+                session.handle?.callQuietly("unlock") { it.unlock() }
+            }
+        }
+    }
+
+    /**
+     * Run one host call, and log rather than throw if the binder is gone.
+     *
+     * These arrive on their game's thread from `lockMsgHandle` / `unlockMsgHandle`, which are
+     * `void` in their interface and have nowhere to put an exception. A [android.os.DeadObjectException]
+     * here means OpenBubbles died with a game open — worth a line, not worth taking their activity
+     * down with us.
+     */
+    private inline fun IMessageViewHandle.callQuietly(what: String, call: (IMessageViewHandle) -> Unit) {
+        try {
+            call(this)
+        } catch (e: RemoteException) {
+            Log.w(TAG, "handle.$what() failed — the host is gone", e)
+        }
     }
 
     /**
