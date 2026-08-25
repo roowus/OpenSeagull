@@ -172,17 +172,25 @@ Their activities finish on the first back gesture; under gesture navigation that
 accidentally mid-game. Leaving is now two-step: first press shows "Press back again to leave",
 second within 2 s exits as before.
 
+Back arrives through **two channels** and the split is measured, not assumed (the key-only
+version shipped and silently did nothing on a predictive-back device):
+
+- **API < 33:** back is a key event (`KEYCODE_BACK`), gesture navigation included. The activity's
+  `Window.Callback` is wrapped in a delegating shell intercepting back-up.
+- **API ≥ 33:** the system arms its own finish-on-back callback on every window regardless of what
+  the app opts into, and presses take the `OnBackInvokedCallback` path — the key never fires. The
+  guard registers its own callback at `PRIORITY_DEFAULT` from
+  `window.onBackInvokedDispatcher`, displacing the default.
+
+Both channels share one `Armed` state machine so timing cannot drift between them.
+
 Design constraints that shaped it (a per-game wrapper-subclass design was tried and deleted —
 it violates law 2):
 
 - `Application.ActivityLifecycleCallbacks` sees every activity built in our processes — including
   `:godot` and future games — filtered by class-name prefix, not a hand-maintained list.
-- For each hosted activity, its `Window.Callback` is wrapped in a delegating shell
-  (`Window.Callback by inner`) that intercepts exactly `KEYCODE_BACK` on ACTION_UP, uncanceled.
-  Registered after `onCreate` returns, so Compose dispatchers etc. stay innermost and untouched.
 - Plain platform API only: their activities extend `android.app.Activity`, so androidx
-  `OnBackPressedDispatcher` never applied. Key events cover API 26+ on one path; if the app ever
-  opts into predictive back, an `OnBackInvokedCallback` must be added alongside.
+  `OnBackPressedDispatcher` never applied.
 - Dialogs consume back in their own windows and bypass the guard — intended: the guard is for
   gestures aimed at the game.
 

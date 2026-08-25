@@ -17,7 +17,7 @@ commit, in both directions:
 | Session, identity, payload, or write-back semantics | `ARCHITECTURE.md` §§5–7 |
 | New manifest wire values, new components, new permissions | `ARCHITECTURE.md` §4 + `README.md` if user-visible |
 | Any measured number quoted in docs becomes wrong | fix it everywhere; say what changed |
-| A design constraint gets *disproven* by trying it (like the wrapper-subclass attempt) | record why it failed in the relevant section — dead ends are documentation too |
+| A design constraint gets *disproven* by trying it (like the wrapper-subclass attempt, or the key-only back guard that predictive back silently bypassed) | record why it failed in the relevant section — dead ends are documentation too |
 | New source file with architectural weight | add it to the right section's narrative |
 
 ## How to write like the rest of this repo
