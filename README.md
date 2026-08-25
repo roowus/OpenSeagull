@@ -20,14 +20,20 @@ OpenSeagull ships **no OpenPigeon code, artwork, or game data**. It reads what i
 copy of OpenPigeon already installed on your device. Both apps stay installed, side by side, and
 OpenPigeon is never modified.
 
-> **Status: early.** The architecture is proven on-device: foreign classes load, games enumerate
-> from OpenPigeon's own registry, resources and player identity resolve, the picker grid renders,
-> a sent game round-trips through their encryption and decodes back to its board, and tapping a
-> balloon we cannot open shows a plain-language reason instead of doing nothing. What has not yet
-> run is everything that needs a live OpenBubbles conversation — rendering a received game as a
-> balloon, sending your move back into the chat, and locking the thread while you play. Those are
-> written and unit-tested but have never executed against a real host. Today the app is a
-> diagnostics screen plus an extension with a working game picker.
+> **Status: playable.** The architecture is proven end-to-end on-device: foreign classes load,
+> games enumerate from OpenPigeon's own registry, resources and player identity resolve, the
+> picker grid renders and sends real balloons, received balloons draw as boards with their own
+> art and turn lines, tapping one opens the actual game in our process, moves write back into the
+> conversation, and a stray back gesture no longer closes an open game. The app is still early —
+> game setup screens are not built (configurable games send with defaults), and identity is
+> separate from OpenPigeon proper by design.
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the whole machine works: hosting pipeline,
+  session channel, payload format, identity, back-guard, testing.
+- [docs/MAINTAINING-DOCS.md](docs/MAINTAINING-DOCS.md) — standing rule: **docs are part of the
+  change.** Any commit that alters behaviour updates them in the same commit.
 
 [OpenPigeon]: https://github.com/OpenBubbles/OpenPigeon
 [GamePigeon]: https://apps.apple.com/us/app/gamepigeon/id1124197642
