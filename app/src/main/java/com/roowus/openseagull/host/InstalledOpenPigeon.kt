@@ -193,6 +193,36 @@ class InstalledOpenPigeon private constructor(
             null
         }
 
+    /**
+     * Every archive of theirs that can hold code or libraries: `base.apk` first, then each split.
+     *
+     * [sourceDir] alone is not enough, and the way it fails is quiet. A Play-installed OpenPigeon
+     * arrives as an **App Bundle**, so its `.so` files are not in `base.apk` at all — they sit in
+     * `split_config.<abi>.apk`, and `base.apk` carries no `lib/` directory whatsoever (measured:
+     * zero `lib/` entries, while the arm64 split holds all five libraries including
+     * `libopenbubblesextension.so` and `libc++_shared.so`). Appending only `sourceDir` to the
+     * native search path therefore succeeds, logs `Ok`, and still leaves every library
+     * unfindable — the first hosted game then dies in its `<clinit>` with
+     * `dlopen failed: library "libopenbubblesextension.so" not found`.
+     *
+     * `lib/<abi>` on disk is not a fallback either: these bundles ship
+     * `extractNativeLibs="false"`, so the extracted directory exists but is **empty** and the
+     * linker is expected to mmap straight out of the (uncompressed, page-aligned) split.
+     *
+     * Splits are appended after base so a name present in both resolves to base, matching the
+     * platform's own precedence.
+     */
+    val codePaths: List<String>
+        get() = try {
+            val info = host.packageManager.getApplicationInfo(packageName, 0)
+            buildList {
+                info.sourceDir?.let { add(it) }
+                info.splitSourceDirs?.let { addAll(it.filterNotNull()) }
+            }
+        } catch (_: PackageManager.NameNotFoundException) {
+            emptyList()
+        }
+
     /** Version of the installed OpenPigeon, for diagnostics and compatibility gates. */
     val versionName: String?
         get() = try {

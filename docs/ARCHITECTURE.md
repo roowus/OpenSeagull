@@ -46,7 +46,8 @@ Everything else follows from these. They are not conventions; each has a test or
 │ GodotGameActivity runs here, still OUR process, still reading SessionRegistry     │
 └───────────────────────────────────────────────────────────────────────────────────┘
 ┌────────────── OpenPigeon (separate app, never modified, never entered) ───────────┐
-│  read-only: base.apk mmap'd (dex, lib/<abi>/*.so), resources via addAssetPath     │
+│  read-only: every archive mmap'd (base + splits: dex, lib/<abi>/*.so), resources  │
+│  via addAssetPath                                                                 │
 └───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -73,11 +74,33 @@ Four gates, each with a named failure that used to end launches silently:
 |---|---|---|---|
 | Manifest | `<activity android:name="com.openbubbles.openpigeon.…">` entries — legal because `android:name` resolves through *our* ClassLoader at launch time | `AndroidManifest.xml` | `ActivityNotFoundException` (framework resolves against the installed manifest before any code loads) |
 | Dex | Append their APK to our `dexElements` by stealing elements from a throwaway `PathClassLoader` (version-tolerant — avoids `makePathElements`, whose signature churns) | `ForeignCode.installDex` | `ClassNotFoundException` inside `ActivityThread` |
-| Native | Append `<apk>!/lib/<abi>` to both `nativeLibraryDirectories` *and* `nativeLibraryPathElements` (writing only the first is the classic silent no-op); then `loadLibrary` follows missing-soname linker errors, preloading dependencies by explicit in-APK path until the chain resolves | `ForeignCode.installNativePath` / `.loadLibrary` | `UnsatisfiedLinkError` in their `<clinit>` — which runs during `Class.newInstance`, i.e. before any overridable hook |
-| Resources | Sweep every live `ResourcesImpl` via `ResourcesManager.mResourceImpls` and `addAssetPath` their APK into each AssetManager; verified through `Resources.getResourceName(canary)` | `ForeignCode.installResourcesEverywhere` | `Resources$NotFoundException: Resource ID #0x7f0c001d` on their `setContentView` |
+| Native | Append `<each archive>!/lib/<abi>` to both `nativeLibraryDirectories` *and* `nativeLibraryPathElements` (writing only the first is the classic silent no-op); then `loadLibrary` follows missing-soname linker errors, preloading dependencies by explicit in-APK path until the chain resolves | `ForeignCode.installNativePath` / `.loadLibrary` | `UnsatisfiedLinkError` in their `<clinit>` — which runs during `Class.newInstance`, i.e. before any overridable hook |
+| Resources | Sweep every live `ResourcesImpl` via `ResourcesManager.mResourceImpls` and `addAssetPath` *every* archive of theirs into each AssetManager; verified through `Resources.getResourceName(canary)` | `ForeignCode.installResourcesEverywhere` | `Resources$NotFoundException: Resource ID #0x7f0c001d` on their `setContentView` |
 
 Key facts that make this work:
 
+- **"Their APK" means every archive of theirs** (`InstalledOpenPigeon.codePaths`: base first, then
+  each split), and assuming it means `base.apk` alone is a measured failure mode. A Play-installed
+  OpenPigeon arrives as an App Bundle (versionCode 26071701 on the Pixel 4 XL burner): all five
+  `.so` files sit in `split_config.arm64_v8a.apk`, `base.apk` carries zero `lib/` entries, the
+  extracted `lib/arm64` directory exists but is **empty** (`extractNativeLibs="false"`), and the
+  strings/density resources live in their own splits too. Appending only base logged `Ok` at all
+  three gates and still left every library unfindable — the sweep's first game died in its
+  `<clinit>` with `dlopen failed: library "libopenbubblesextension.so" not found`. Splits are
+  appended after base so a name present in both resolves to base, matching platform precedence;
+  archives without a usable `lib/<abi>` are skipped rather than failed, because that is what base
+  looks like in a bundle install.
+- **"Ours always comes first" is only safe while ours is a superset.** The dex merge puts our
+  classes ahead of theirs, so any androidx class *their* build calls resolves to *our* copy — and
+  if ours is older, the call dies as `NoSuchMethodError`/`NoSuchFieldError` inside their code,
+  pointing nowhere near the cause. Measured against versionCode 26071701: their Compose-based
+  games (WordHunt, SecretWord) call `SparseArrayCompat`'s `DefaultConstructorMarker` constructor
+  (androidx.collection ≥ 1.4) and `ViewModelProvider.Companion` (lifecycle ≥ 2.5); the versions
+  appcompat/core-ktx resolve transitively predate both. The fix is a direct dependency on
+  `androidx.collection:collection:1.6.0` and `androidx.lifecycle:{viewmodel,runtime}:2.11.0` —
+  see `gradle/libs.versions.toml`, where the reasoning lives next to the pins. Their build moving
+  to newer androidx is a standing upgrade obligation for ours, surfaced by exactly these two
+  error shapes.
 - Our resource table lives at **package id 0x80** (`--package-id 0x80 --allow-reserved-package-id`
   in `app/build.gradle.kts`), theirs at 0x7f. Measured 0/379 id collisions either merge order;
   at the default 0x7f it was 58 — silent wrong images, no exceptions.
@@ -85,7 +108,8 @@ Key facts that make this work:
   tools:replace against androidx's CoreComponentFactory) triggers all three injections the instant
   before the framework builds one of their activities. Idempotent and cached; a process that opens
   no game pays nothing.
-- ABI choice reads their APK's actual `lib/` directories rather than trusting `SUPPORTED_ABIS`.
+- ABI choice reads each of their archives' actual `lib/` directories rather than trusting
+  `SUPPORTED_ABIS`.
 
 ## 4. The extension contract — talking to OpenBubbles
 
@@ -216,7 +240,7 @@ package Context returns null there and NPEs inside `SettingsData.init`).
 - **JVM (`testDebugUnitTest`, gates CI):** `WireContractTest` pins the manifest routing values and
   enforces the content-free rule; `PaginationTest` covers the paging arithmetic whose bugs are
   otherwise unreachable pages with no error.
-- **Instrumented (`connectedAndroidTest`, needs device + OpenPigeon):** eleven probes, each
+- **Instrumented (`connectedAndroidTest`, needs device + OpenPigeon):** twelve probes, each
   measuring one architectural claim — `RuntimeHostProbe` (loader isolation), `ForeignCodeProbe`,
   `GameplayFeasibilityProbe` (native chain), `HostedActivityProbe` (activity to RESUMED),
   `HostedSessionProbe` (board data actually reaches their replay code — the oracle is *their*
@@ -224,8 +248,36 @@ package Context returns null there and NPEs inside `SettingsData.init`).
   `PickerRenderProbe`, `GameSessionBindProbe`, `ForeignIdentityProbe`, `UnsupportedGameProbe`,
   `BackGuardProbe` (press #1 keeps the hosted game, press #2 exits — asserted against the
   system's own resumed-activity answer, pressed from *inside* the test because instrumentation
-  teardown kills the game the moment the method returns).
+  teardown kills the game the moment the method returns), and `GameOpenProbe`.
   Suite skips (not fails) when OpenPigeon is absent.
+- `GameOpenProbe` is the one **survey**, not a gate: it opens all eight hosted activities in turn
+  and records whether each is the top resumed activity 5 s later, so "which games open vs which
+  crash" has a measured answer instead of an impression. It asserts nothing — a game that fails is
+  a row in the table, not a red build, because the point is to see the whole distribution in one
+  run. It presses HOME between games (back is exactly the input BackGuard now intercepts), and
+  writes to `getExternalFilesDir(null)/game-open-report.txt` rather than logcat: the Pixel 4 XL
+  burner drops app logcat across the instrumentation lifecycle, so the sibling convention of
+  `logcat -d` returned nothing here. Read it with
+  `adb shell cat /sdcard/Android/data/com.roowus.openseagull/files/game-open-report.txt`.
+  "Opened" means their code survived `<clinit>`, bind, and first frame — never that the game is
+  *playable*; that still ends with a human and a real balloon.
+  Three hardening details, each taught by a run that lost its own evidence:
+  - **Each row is flushed the moment it is measured**, and a PENDING row is written *before* the
+    5 s settle and replaced after — because a game can kill the process during the settle window
+    itself (Crazy8 did), and a row stranded on PENDING is itself a verdict: launched, then took
+    the process down.
+  - **A session is registered before every launch**, seeded with a board composed by *their*
+    `getNewGameData` (via `ForeignGameCatalog.byName` under the wire names logged from their
+    registry — knockout is `knock`, WordHunt is `hunt`; a wrong name degrades to a 1-key fallback
+    their parsers die on). Without this, their games answer an unknown session by `finish()`ing —
+    designed behaviour that reads as a hosting failure.
+  - **`-e only <simple names>`** reruns exactly those games, so a process-killer is excludable
+    rather than re-run; the probe skips games whose row already exists on disk.
+  Sweep result on the Pixel 4 XL (OpenPigeon versionCode 26071701, 2026-08-25), after the bundle
+  and androidx fixes below: Knockout, Pool, Golf, WordHunt, SecretWord open and stay; Shuffle is
+  `CLASS-NOT-FOUND` (added upstream after this APK was built); Crazy8 launches and takes the
+  process down in its own `onPause` (their code, missing state on our launch path); GodotGameActivity
+  launches but is not the resumed activity within 5 s — its 71 MB engine load, not a hosting gate.
 - `ForeignResourcesReport` runs from `DiagnosticsActivity` in a **non-instrumented** launch
   because `am instrument --no-hidden-api-checks` lifts exactly the greylist restriction being
   tested — a measurement taken with the obstacle removed proves nothing about production.
@@ -236,6 +288,12 @@ confirmed only for `createPackageContext(INCLUDE_CODE)` itself, not the full sui
 
 ## 11. Known limits
 
+- Crazy8 crashes in its own `onPause` (their code, 26071701, line ~1457) when hosted without the
+  state their normal launch path produces; it takes the process down, so it is excluded from the
+  sweep via `-e only`. Unfixable here without patching their dex — a real-balloon launch may
+  provide the state its pause path expects, which is the pending human test.
+- GodotGameActivity hosts, but the survey's 5 s window is shorter than its 71 MB engine load;
+  "not resumed at 5 s" there is a measurement floor, not a failure verdict.
 - Configuration UIs unbuilt: configurable games (17 of 26) are sent with default settings, logged.
 - Identity does not carry over from OpenPigeon proper (sandbox; deliberate).
 - Their settings layer runs on defaults — storage writes into their directory fail (`false`),

@@ -3,6 +3,8 @@ agp = "9.2.1"
 kotlin = "2.2.10"
 coreKtx = "1.13.1"
 appcompat = "1.6.1"
+collection = "1.6.0"
+lifecycle = "2.11.0"
 junit = "4.13.2"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
@@ -10,6 +12,15 @@ espressoCore = "3.5.1"
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+# Direct, and newer than what appcompat/core-ktx resolve transitively, on purpose: their
+# Compose-based games (WordHunt, SecretWord) call SparseArrayCompat's DefaultConstructorMarker
+# constructor, which only exists from the 1.4 Kotlin rewrite. Ours comes first in the dex merge,
+# so a stale copy here shadows theirs and kills those games in <clinit> with NoSuchMethodError.
+androidx-collection = { group = "androidx.collection", name = "collection", version.ref = "collection" }
+# Same reasoning as collection: their Compose games reach ViewModelProvider.Companion and friends,
+# which old appcompat-era lifecycle jars do not carry. Ours shadows theirs in the dex merge.
+androidx-lifecycle-viewmodel = { group = "androidx.lifecycle", name = "lifecycle-viewmodel", version.ref = "lifecycle" }
+androidx-lifecycle-runtime = { group = "androidx.lifecycle", name = "lifecycle-runtime", version.ref = "lifecycle" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }

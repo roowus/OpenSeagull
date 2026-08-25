@@ -153,11 +153,30 @@ object ForeignCode {
     fun installDex(pigeon: InstalledOpenPigeon): Result = synchronized(lock) {
         dexInstalled?.let { return it.repeat() }
         val result = try {
-            val apk = pigeon.sourceDir
-                ?: return@synchronized Result.Failed("their APK path is unknown").also {
+            val apks = pigeon.codePaths.ifEmpty {
+                return@synchronized Result.Failed("their APK path is unknown").also {
                     dexInstalled = it
                 }
-            appendDex(ForeignCode::class.java.classLoader!!, apk)
+            }
+            // Every archive, not just base: a bundle's feature splits carry their own dex. Appends
+            // of dex-free archives are harmless no-ops (a donor over them yields no elements).
+            var ours = -1
+            var theirs = 0
+            for (apk in apks) {
+                appendDex(ForeignCode::class.java.classLoader!!, apk).let {
+                    if (it is Result.Ok) {
+                        if (ours < 0) ours = it.detail.substringBefore(" of ").toIntOrNull() ?: -1
+                        theirs += it.detail.substringAfterLast("+ ").substringBefore(" of")
+                            .trim().toIntOrNull() ?: 0
+                    }
+                }
+            }
+            if (theirs == 0) {
+                Result.Failed("their APKs yielded no dex elements")
+            } else {
+                @Suppress("USELESS_ELVIS")
+                Result.Ok("${if (ours < 0) 0 else ours} of ours + $theirs of theirs")
+            }
         } catch (e: ReflectiveOperationException) {
             // The internals this depends on are not API. A future Android that hides them is a
             // supported outcome: hosting stops working, everything reflective keeps working.
@@ -171,7 +190,19 @@ object ForeignCode {
     }
 
     /**
-     * Put `<their apk>!/lib/<abi>` on our native search path.
+     * Put `<each of their archives>!/lib/<abi>` on our native search path.
+     *
+     * Every archive, not just base: a Play-installed OpenPigeon arrives as an App Bundle whose
+     * `.so` files sit in `split_config.<abi>.apk` while `base.apk` carries no `lib/` directory at
+     * all (measured on the Pixel 4 XL burner against versionCode 26071701: zero `lib/` entries in
+     * base, all five libraries in the arm64 split, and the extracted `lib/arm64` directory present
+     * but *empty* because the bundle sets `extractNativeLibs="false"`). Appending only base
+     * therefore logged `Ok` and still left every library unfindable — the first hosted game died
+     * in its `<clinit>` with `dlopen failed: library "libopenbubblesextension.so" not found`.
+     *
+     * Archives without a usable `lib/<abi>` are skipped rather than failed: that is what base looks
+     * like in a bundle install, and what a single-APK sideload looks like from its splits' point
+     * of view. Only when *no* archive offers an ABI this device runs does the call fail.
      *
      * Does not load anything — [loadLibrary] does that. Separated because the search path is a
      * process-wide change and the load is per-library, and because a failure here should be
@@ -180,16 +211,30 @@ object ForeignCode {
     fun installNativePath(pigeon: InstalledOpenPigeon): Result = synchronized(lock) {
         nativeInstalled?.let { return it.repeat() }
         val result = try {
-            val apk = pigeon.sourceDir
-                ?: return@synchronized Result.Failed("their APK path is unknown").also {
+            val apks = pigeon.codePaths.ifEmpty {
+                return@synchronized Result.Failed("their APK path is unknown").also {
                     nativeInstalled = it
                 }
-            val abi = abiIn(apk)
-                ?: return@synchronized Result.Failed(
-                    "their APK carries no library directory for any ABI this device supports " +
-                        "(${Build.SUPPORTED_ABIS.joinToString()})",
-                ).also { nativeInstalled = it }
-            appendNativePath(ForeignCode::class.java.classLoader!!, apk, abi)
+            }
+            var lastOk: Result.Ok? = null
+            var appended = 0
+            for (apk in apks) {
+                val abi = abiIn(apk) ?: continue
+                when (val one = appendNativePath(ForeignCode::class.java.classLoader!!, apk, abi)) {
+                    is Result.Ok -> {
+                        lastOk = one
+                        appended++
+                    }
+                    is Result.Failed -> Unit
+                }
+            }
+            when {
+                appended == 0 -> Result.Failed(
+                    "no archive of theirs carries a library directory for any ABI this device " +
+                        "supports (${Build.SUPPORTED_ABIS.joinToString()})",
+                )
+                else -> Result.Ok("${lastOk?.detail} across $appended archive(s)")
+            }
         } catch (e: ReflectiveOperationException) {
             Result.Failed("DexPathList is not reachable (${e.javaClass.simpleName})")
         }
@@ -218,8 +263,7 @@ object ForeignCode {
             is Result.Failed -> return path
             is Result.Ok -> Unit
         }
-        val apk = pigeon.sourceDir ?: return Result.Failed("their APK path is unknown")
-        val abi = abiIn(apk) ?: return Result.Failed("no usable ABI in their APK")
+        val apks = pigeon.codePaths.ifEmpty { return Result.Failed("their APK path is unknown") }
 
         synchronized(lock) {
             loadedLibraries[name]?.let { return it.repeat() }
@@ -233,7 +277,14 @@ object ForeignCode {
                             "namespace is rejecting it rather than failing to find it",
                     )
                 }
-                val full = "$apk!/lib/$abi/$missing"
+                // The dependency may live in any of their archives — in a bundle install the ABI
+                // split is the only one with a lib/ directory at all — so the soname is searched
+                // for rather than assumed into base.
+                val full = pathOfLibrary(apks, missing)
+                    ?: return Result.Failed(
+                        "dependency $missing is in no archive of theirs " +
+                            "(${apks.joinToString { it.substringAfterLast('/') }})",
+                    )
                 try {
                     System.load(full)
                 } catch (e: LinkageError) {
@@ -259,6 +310,27 @@ object ForeignCode {
                 Result.Failed("could not load $name: $outcome")
             }
         }
+    }
+
+    /**
+     * The `<archive>!/lib/<abi>/<soname>` address of [soname] in whichever of [apks] carries it,
+     * or `null`.
+     *
+     * Reads central directories only ([ZipFile] does not touch entry data), so this is cheap even
+     * against Godot's 71 MB engine library.
+     */
+    private fun pathOfLibrary(apks: List<String>, soname: String): String? {
+        for (apk in apks) {
+            val abi = abiIn(apk) ?: continue
+            val present = try {
+                ZipFile(File(apk)).use { it.getEntry("lib/$abi/$soname") != null }
+            } catch (_: Exception) {
+                // Unreadable archive — the same transient case abiIn logs; try the next archive.
+                false
+            }
+            if (present) return "$apk!/lib/$abi/$soname"
+        }
+        return null
     }
 
     /**
@@ -343,7 +415,12 @@ object ForeignCode {
         if (!patchedAssets.add(assets)) {
             return Result.Ok("their table is already on @${idOf(assets)}", alreadyDone = true)
         }
-        val apk = pigeon.sourceDir ?: run {
+        // Every archive, not just base: a bundle's splits carry resources too — `split_config.en`
+        // the strings, `xxxhdpi` the density variants — and an id that only exists in a split is
+        // exactly as unresolvable as one that existed nowhere. The per-object guard above means
+        // each AssetManager receives each archive once, whatever order calls arrive in.
+        val apks = pigeon.codePaths
+        if (apks.isEmpty()) {
             // Removed again so a later call can retry: unlike a missing DexPathList field, an
             // unreadable package path is a transient condition (a mid-update install), and pinning
             // this AssetManager as done-and-failed would outlive the cause.
@@ -354,13 +431,22 @@ object ForeignCode {
         val result = try {
             val addAssetPath = AssetManager::class.java
                 .getMethod("addAssetPath", String::class.java)
-            val cookie = addAssetPath.invoke(assets, apk) as? Int
+            var firstCookie = 0
+            var appended = 0
+            for (apk in apks) {
+                val cookie = addAssetPath.invoke(assets, apk) as? Int ?: 0
+                if (cookie == 0) continue
+                if (firstCookie == 0) firstCookie = cookie
+                appended++
+            }
             when {
-                cookie == null || cookie == 0 ->
-                    Result.Failed("addAssetPath on @${idOf(assets)} returned $cookie")
+                appended == 0 ->
+                    Result.Failed(
+                        "addAssetPath on @${idOf(assets)} accepted none of ${apks.size} archives",
+                    )
                 verifyWith == null ->
-                    Result.Ok("cookie $cookie on @${idOf(assets)}, unverified")
-                else -> verify(verifyWith, cookie, assets)
+                    Result.Ok("$appended archive(s), cookie $firstCookie, unverified")
+                else -> verify(verifyWith, firstCookie, assets)
             }
         } catch (e: ReflectiveOperationException) {
             // addAssetPath is greylisted, not public. A future Android that enforces the greylist
