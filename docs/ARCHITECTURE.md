@@ -216,12 +216,15 @@ package Context returns null there and NPEs inside `SettingsData.init`).
 - **JVM (`testDebugUnitTest`, gates CI):** `WireContractTest` pins the manifest routing values and
   enforces the content-free rule; `PaginationTest` covers the paging arithmetic whose bugs are
   otherwise unreachable pages with no error.
-- **Instrumented (`connectedAndroidTest`, needs device + OpenPigeon):** ten probes, each measuring
-  one architectural claim — `RuntimeHostProbe` (loader isolation), `ForeignCodeProbe`,
+- **Instrumented (`connectedAndroidTest`, needs device + OpenPigeon):** eleven probes, each
+  measuring one architectural claim — `RuntimeHostProbe` (loader isolation), `ForeignCodeProbe`,
   `GameplayFeasibilityProbe` (native chain), `HostedActivityProbe` (activity to RESUMED),
   `HostedSessionProbe` (board data actually reaches their replay code — the oracle is *their*
   log line, not our own map), `SendGameProbe` (compose + parcel bridge round-trip),
-  `PickerRenderProbe`, `GameSessionBindProbe`, `ForeignIdentityProbe`, `UnsupportedGameProbe`.
+  `PickerRenderProbe`, `GameSessionBindProbe`, `ForeignIdentityProbe`, `UnsupportedGameProbe`,
+  `BackGuardProbe` (press #1 keeps the hosted game, press #2 exits — asserted against the
+  system's own resumed-activity answer, pressed from *inside* the test because instrumentation
+  teardown kills the game the moment the method returns).
   Suite skips (not fails) when OpenPigeon is absent.
 - `ForeignResourcesReport` runs from `DiagnosticsActivity` in a **non-instrumented** launch
   because `am instrument --no-hidden-api-checks` lifts exactly the greylist restriction being
