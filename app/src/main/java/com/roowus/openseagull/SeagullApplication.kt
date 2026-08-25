@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import com.roowus.openseagull.host.BackGuard
 import com.roowus.openseagull.host.ForeignCode
 import com.roowus.openseagull.host.InstalledOpenPigeon
 import com.roowus.openseagull.host.SeagullIdentity
@@ -100,6 +101,11 @@ class SeagullApplication : Application() {
         // lines from now. Handing over a Context is free — nothing is read or minted until the
         // first session opens.
         SeagullIdentity.attach(this)
+
+        // Same reasoning as above for running it here: :godot builds its activities with no call
+        // site of ours in between, and a game added to their registry after this file was written
+        // is covered by the class-name check inside rather than by a list maintained by hand.
+        BackGuard.attach(this)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             // HostedComponentFactory has it, and will do it later and more cheaply.

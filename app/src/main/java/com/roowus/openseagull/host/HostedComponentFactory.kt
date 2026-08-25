@@ -60,6 +60,10 @@ class HostedComponentFactory : CoreComponentFactory() {
      * activities. A list would have to be kept in step with the manifest by hand, and the check it
      * would buy is one the framework already performs — an undeclared component never reaches this
      * method.
+     *
+     * Back-gesture interception is deliberately NOT done here: an `AppComponentFactory` sees the
+     * class name but no instance, and the instance's window does not exist until `onCreate` has
+     * run. That work lives in [BackGuard], registered process-wide from [SeagullApplication].
      */
     override fun instantiateActivity(
         cl: ClassLoader,

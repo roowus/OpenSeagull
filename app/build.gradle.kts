@@ -26,7 +26,7 @@ android {
         // refreshCache() throw mid-loop on a package that no longer exists.
         //
         // versionName restarts at 0.1.0 because that is honestly where this codebase is.
-        versionCode = 26082102
+        versionCode = 26082401
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

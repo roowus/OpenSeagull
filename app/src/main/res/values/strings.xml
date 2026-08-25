@@ -5,4 +5,9 @@
          otherwise unlabelled glyphs. -->
     <string name="picker_previous_page">Previous page</string>
     <string name="picker_next_page">Next page</string>
+
+    <!-- Shown by the hosted-game wrappers' first back press; the second within the window exits.
+         "Leave" rather than "exit" because the game itself stays where it is — the session is
+         kept and re-entering the balloon reopens the board. -->
+    <string name="back_again_to_leave">Press back again to leave the game</string>
 </resources>
