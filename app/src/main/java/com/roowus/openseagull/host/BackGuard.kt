@@ -2,12 +2,14 @@ package com.roowus.openseagull.host
 
 import android.app.Activity
 import android.app.Application
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.Window
 import android.widget.Toast
 import com.roowus.openseagull.R
+import android.window.OnBackInvokedDispatcher
 
 /**
  * A stray back gesture no longer ends a hosted game on the first press.
@@ -58,14 +60,28 @@ import com.roowus.openseagull.R
  * the intent: the guard exists for gestures aimed at the game, not at something floating over
  * it.
  *
- * ## Why key events and not `onBackPressedDispatcher` or predictive back
+ * ## Why two delivery paths, measured rather than assumed
  *
- * The app does not opt into `android:enableOnBackInvokedCallback`, so on every API level the
- * system delivers back to the activity as a key event — gesture navigation included. Intercepting
- * `dispatchKeyEvent` therefore covers API 26 through current with one code path. If the app ever
- * opts into predictive back, back stops arriving as keys and this file needs an
- * `OnBackInvokedCallback` registered alongside — the failure mode of forgetting is the old
- * instant-exit behaviour returning, not a crash.
+ * Back reaches an activity through whichever channel its window has armed, and the channels split
+ * at API 33:
+ *
+ * - Below 33, back arrives as a key event (`KEYCODE_BACK`), gesture navigation included — the
+ *   [Guarded] shell intercepts it in [Guarded.dispatchKeyEvent].
+ * - At 33 and above — **measured on-device**, not read off release notes — the system attaches an
+ *   `OnBackInvokedCallbackInfo` to the hosted window regardless of anything this app opts into,
+ *   and a back press takes the `OnBackInvokedCallback` path. The first shipped version of this
+ *   guard intercepted only key events; on such a device the press never reached it, the system's
+ *   default callback fired, and the activity was destroyed exactly as if no guard existed. The
+ *   log evidence is unambiguous: `CoreBackPreview: … Setting back callback
+ *   OnBackInvokedCallbackInfo{…}` followed by `KnockoutActivity … DESTROYED` one press later.
+ *
+ * So from 33 up the guard registers its own [android.window.OnBackInvokedCallback] at
+ * [android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT], which displaces the default
+ * finish-on-back behaviour for that window. The two paths share one state machine ([Armed]) so
+ * the two-step timing behaves identically whichever channel delivers the press.
+ *
+ * A dialog consumes back inside its own window and never reaches either hook, which matches the
+ * intent: the guard exists for gestures aimed at the game, not at something floating over it.
  *
  * ## Scope, stated precisely
  *
@@ -87,11 +103,27 @@ object BackGuard {
 
         override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
             if (!guarded(activity)) return
+
+            // API 33+: the system has armed its own finish-on-back callback on this window (see
+            // the class KDoc — measured, not assumed). Registering ours at PRIORITY_DEFAULT
+            // displaces it; without this the key shell below never sees a press.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                activity.window.onBackInvokedDispatcher
+                    .registerOnBackInvokedCallback(
+                        OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                        BackPress(activity, armed(activity)),
+                    )
+                return
+            }
+
             // The callback can be null on a window that has none yet; installing nothing there is
             // right — there is no back event for a window that never receives one.
             val inner = activity.window.callback ?: return
-            activity.window.callback = Guarded(inner, activity)
+            activity.window.callback = Guarded(inner, armed(activity))
         }
+
+        /** One two-step state machine per activity, shared by whichever channel delivers. */
+        private fun armed(activity: Activity) = Armed(activity)
 
         // The remaining seven are required by the interface and genuinely empty: teardown needs no
         // mirror of the wrap because a destroyed activity takes its window with it.
@@ -104,15 +136,48 @@ object BackGuard {
     }
 
     /**
-     * One shell around whatever the window already had. Everything delegates; only back-up
-     * is examined.
+     * The two-step exit state machine, shared by both delivery channels so their timing cannot
+     * drift apart. First press arms and says so; a second inside the window hands back `true`
+     * meaning "let it through"; anything else is consumed.
+     */
+    private class Armed(private val activity: Activity) {
+
+        private var lastBack = 0L
+
+        /**
+         * One back press. Returns whether the press should proceed to the normal behaviour
+         * (finish), after arming or re-arming as needed.
+         */
+        fun consume(): Boolean {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastBack < BackExitWindowMs) {
+                lastBack = 0L
+                return true
+            }
+            lastBack = now
+            Toast.makeText(activity, R.string.back_again_to_leave, Toast.LENGTH_SHORT).show()
+            return false
+        }
+    }
+
+    /** The predictive-back channel's view of one press: consume when armed, finish on the second. */
+    private class BackPress(
+        private val activity: Activity,
+        private val armed: Armed,
+    ) : android.window.OnBackInvokedCallback {
+        override fun onBackInvoked() {
+            if (armed.consume()) activity.finish()
+        }
+    }
+
+    /**
+     * One shell around whatever the window already had — the sub-33 key-event path only. The
+     * predictive-back path (33+) never reaches here; see the class KDoc for why both exist.
      */
     private class Guarded(
         private val inner: Window.Callback,
-        private val activity: Activity,
+        private val armed: Armed,
     ) : Window.Callback by inner {
-
-        private var lastBack = 0L
 
         override fun dispatchKeyEvent(event: KeyEvent): Boolean {
             val isBackUp = event.keyCode == KeyEvent.KEYCODE_BACK &&
@@ -121,15 +186,9 @@ object BackGuard {
                 !event.isCanceled
             if (!isBackUp) return inner.dispatchKeyEvent(event)
 
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastBack >= BackExitWindowMs) {
-                lastBack = now
-                Toast.makeText(activity, R.string.back_again_to_leave, Toast.LENGTH_SHORT).show()
-                return true
-            }
             // Second press inside the window: behave exactly as the unguarded window would.
-            lastBack = 0L
-            return inner.dispatchKeyEvent(event)
+            if (armed.consume()) return inner.dispatchKeyEvent(event)
+            return true
         }
     }
 
